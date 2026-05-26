@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.9
+# Version: 1.2.10
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.9"
+SCRIPT_VERSION="1.2.10"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -693,7 +693,7 @@ _add_inbound_json() {
   case "$proto" in
     vless)
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg uuid "$uuid" '{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:false}}') ;;
-    vless-reality|reality|sheldon-vless)
+    vless-reality|reality|sheldon|sheldon-reality|sheldon-vless)
       _generate_reality_material || return 1
       LAST_REALITY_PUBLIC="$REALITY_PUBLIC"; LAST_REALITY_SHORT_ID="$REALITY_SHORT_ID"; LAST_REALITY_SNI="$REALITY_SERVER_NAME"; LAST_REALITY_ALPN="$REALITY_ALPN"
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg uuid "$uuid" --arg pk "$REALITY_PRIVATE" --arg sid "$REALITY_SHORT_ID" --arg sni "$REALITY_SERVER_NAME" --arg hs "$REALITY_HANDSHAKE_SERVER" '{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,alpn:["h2","http/1.1"],reality:{enabled:true,handshake:{server:$hs,server_port:443},private_key:$pk,short_id:[$sid]}}}') ;;
@@ -711,7 +711,7 @@ _add_inbound_json() {
       local ck cert key; ck="$(_ensure_tls_cert "${tag}-${port}")" || { _err "AnyTLS 需要 TLS 证书，且 openssl 不可用"; return 1; }
       cert="${ck%%|*}"; key="${ck##*|}"
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" --arg cert "$cert" --arg key "$key" '{type:"anytls",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pass}],tls:{enabled:true,certificate_path:$cert,key_path:$key}}' ) ;;
-    anytls-reality|any-reality|sheldon|sheldon-reality)
+    anytls-reality|any-reality|sheldon-anytls)
       _generate_reality_material || return 1
       LAST_REALITY_PUBLIC="$REALITY_PUBLIC"; LAST_REALITY_SHORT_ID="$REALITY_SHORT_ID"; LAST_REALITY_SNI="$REALITY_SERVER_NAME"; LAST_REALITY_ALPN="$REALITY_ALPN"
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" --arg pk "$REALITY_PRIVATE" --arg sid "$REALITY_SHORT_ID" --arg sni "$REALITY_SERVER_NAME" --arg hs "$REALITY_HANDSHAKE_SERVER" '{type:"anytls",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pass}],tls:{enabled:true,server_name:$sni,alpn:["h2","http/1.1"],reality:{enabled:true,handshake:{server:$hs,server_port:443},private_key:$pk,short_id:[$sid]}}}' ) ;;
@@ -740,8 +740,8 @@ _table_users() {
 }
 
 _add_user() {
-  echo -e "${CYAN}支持协议: sheldon/sheldon-vless/vless-reality/anytls-reality/vless/vmess/trojan/hysteria2/tuic/shadowsocks/anytls/socks${NC}"
-  echo -e "${YELLOW}推荐: sheldon = AnyTLS + Reality + 公共站点伪装 + fp=chrome + NTP 校时${NC}"
+  echo -e "${CYAN}支持协议: sheldon/sheldon-vless/vless-reality/sheldon-anytls/anytls-reality/vless/vmess/trojan/hysteria2/tuic/shadowsocks/anytls/socks${NC}"
+  echo -e "${YELLOW}推荐: sheldon = VLESS + Reality + Vision + 公共站点伪装 + fp=chrome + NTP 校时${NC}"
   read -r -p "用户名: " name
   [ -n "$name" ] || { _err "用户名不能为空"; return; }
   read -r -p "协议 [sheldon]: " proto; proto="${proto:-sheldon}"
@@ -770,7 +770,7 @@ _create_protocol_only() {
   _init_dirs
   echo -e "${CYAN}直接创建协议入站，不写入用户/套餐表。${NC}"
   echo -e "${YELLOW}推荐协议: sheldon；如需用户流量/套餐统计，请走 用户管理 -> 新增用户。${NC}"
-  echo -e "${CYAN}支持协议: sheldon/sheldon-vless/vless-reality/anytls-reality/vless/vmess/trojan/hysteria2/tuic/shadowsocks/anytls/socks${NC}"
+  echo -e "${CYAN}支持协议: sheldon/sheldon-vless/vless-reality/sheldon-anytls/anytls-reality/vless/vmess/trojan/hysteria2/tuic/shadowsocks/anytls/socks${NC}"
   local name proto port uuid pass tag host
   read -r -p "协议备注 [sheldon]: " name; name="${name:-sheldon}"
   read -r -p "协议 [sheldon]: " proto; proto="${proto:-sheldon}"
@@ -811,14 +811,14 @@ _build_share_link() {
   local name="$1" proto="$2" host="$3" port="$4" uuid="$5" pass="$6" pbk="${7:-}" sid="${8:-}" sni="${9:-www.microsoft.com}" alpn="${10:-h2,http/1.1}"
   case "$proto" in
     vless) echo "vless://${uuid}@${host}:${port}?type=tcp&security=none#${name}" ;;
-    vless-reality|reality|sheldon-vless) echo "vless://${uuid}@${host}:${port}?type=tcp&security=reality&sni=${sni}&pbk=${pbk}&sid=${sid}&fp=chrome&alpn=${alpn}&flow=xtls-rprx-vision#${name}" ;;
+    vless-reality|reality|sheldon|sheldon-reality|sheldon-vless) echo "vless://${uuid}@${host}:${port}?type=tcp&security=reality&sni=${sni}&pbk=${pbk}&sid=${sid}&fp=chrome&alpn=${alpn}&flow=xtls-rprx-vision#${name}" ;;
     vmess) echo "vmess://$(printf '{"v":"2","ps":"%s","add":"%s","port":"%s","id":"%s","aid":"0","net":"tcp","type":"none","host":"","path":"","tls":""}' "$name" "$host" "$port" "$uuid" | base64 -w0)" ;;
     trojan) echo "trojan://${pass}@${host}:${port}#${name}" ;;
     hysteria2|hy2) echo "hy2://${pass}@${host}:${port}?insecure=1#${name}" ;;
     tuic) echo "tuic://${uuid}:${pass}@${host}:${port}?congestion_control=bbr&udp_relay_mode=native#${name}" ;;
     shadowsocks|ss) echo "ss://$(printf '2022-blake3-aes-128-gcm:%s' "$pass" | base64 -w0)@${host}:${port}#${name}" ;;
     anytls) echo "anytls://${pass}@${host}:${port}?insecure=1#${name}" ;;
-    anytls-reality|any-reality|sheldon|sheldon-reality) echo "anytls://${pass}@${host}:${port}?security=reality&sni=${sni}&pbk=${pbk}&sid=${sid}&fp=chrome&alpn=${alpn}#${name}" ;;
+    anytls-reality|any-reality|sheldon-anytls) echo "anytls://${pass}@${host}:${port}?security=reality&sni=${sni}&pbk=${pbk}&sid=${sid}&fp=chrome&alpn=${alpn}#${name}" ;;
     socks) echo "socks5://user:${pass}@${host}:${port}#${name}" ;;
   esac
 }
@@ -1163,18 +1163,19 @@ _user_menu() {
 
 _proto_support_text() {
   echo -e "${CYAN}当前脚本支持 sing-box v${SINGBOX_VERSION} 常用新协议:${NC}"
-  echo "- Sheldon 协议：脚本自创安全预设，实际为 AnyTLS + Reality + 公共站点伪装 + fp=chrome + NTP"
-  echo "- Sheldon VLESS：VLESS + Reality + Vision + 公共站点伪装"
+  echo "- Sheldon 协议：脚本自创安全预设，实际为 VLESS + Reality + Vision + 公共站点伪装 + fp=chrome + NTP"
+  echo "- Sheldon AnyTLS：高级选项，AnyTLS + Reality；客户端支持不全时不要优先用"
   echo "- AnyTLS Reality / VLESS Reality"
   echo "- VLESS / VMess / Trojan"
   echo "- Hysteria2 / TUIC v5"
   echo "- Shadowsocks 2022-blake3-aes-128-gcm"
   echo "- AnyTLS / SOCKS5 入站"
   echo
-  echo "推荐优先级: sheldon > sheldon-vless > anytls-reality > vless-reality。"
+  echo "推荐优先级: sheldon > sheldon-vless > vless-reality > sheldon-anytls/anytls-reality。"
   echo "默认安全策略: Reality 公共站点握手伪装、fp=chrome、ALPN=h2/http1.1、NTP 自动校时、log=error、关闭 cache_file。"
   echo "说明: Sheldon 是 sing-box Sheldon 的高安全配置预设，不魔改 sing-box 核心，客户端兼容性更好。"
-  echo "新增: 可直接创建协议入站，不需要添加用户；但不进入用户/套餐/流量表。"
+  echo "新增: 可直接创建协议入站，不需要添加用户；但不进入用户/套餐/流量表。
+兼容性修复: sheldon 默认改为 VLESS Reality Vision，AnyTLS Reality 保留为 sheldon-anytls 高级选项。"
 }
 
 _proto_menu() {

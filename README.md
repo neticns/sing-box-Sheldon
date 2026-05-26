@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.12`
 >
-> 脚本版本：`v1.2.9`
+> 脚本版本：`v1.2.10`
 
 ## 功能特性
 
@@ -19,7 +19,7 @@
   - 直接创建新协议入站，不必添加用户
   - 协议入站不进入用户/套餐/流量表，适合快速开独立节点
 - 支持常用与新型防封协议
-  - Sheldon 协议：脚本自创高安全预设，基于 AnyTLS + Reality + 公共站点伪装 + NTP
+  - Sheldon 协议：脚本自创高安全预设，基于 VLESS + Reality + Vision + 公共站点伪装 + NTP
   - Sheldon VLESS：基于 VLESS Reality + Vision 的兼容预设
   - VLESS
   - VLESS Reality
@@ -120,7 +120,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.9]
+        [sing-box Sheldon 管理系统 V1.2.10]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
@@ -189,6 +189,21 @@ sp
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
 ```
 
+## v1.2.10 Sheldon 连接修复
+
+修复 `Sheldon` 协议部分客户端连接不上的问题：
+
+- 根因：之前默认 `sheldon` 使用 `AnyTLS + Reality`，服务端配置能通过 `sing-box check`，但不少客户端对 AnyTLS Reality 链接兼容不完整。
+- 处理：默认 `sheldon` 改为更通用的 `VLESS + Reality + Vision`。
+- 保留：`AnyTLS + Reality` 不删除，改为高级协议别名 `sheldon-anytls` / `anytls-reality`。
+- 推荐：新建节点直接输入 `sheldon`。
+
+协议优先级：
+
+```text
+sheldon > sheldon-vless > vless-reality > sheldon-anytls / anytls-reality
+```
+
 ## v1.2.9 协议管理优化
 
 主菜单 `3. 协议管理` 现在支持数字操作：
@@ -222,9 +237,10 @@ sp
 协议别名：
 
 ```text
-sheldon           # 推荐，AnyTLS + Reality + 公共站点伪装
+sheldon           # 推荐，VLESS + Reality + Vision + 公共站点伪装
 sheldon-reality   # sheldon 的同义别名
-sheldon-vless     # VLESS + Reality + Vision 兼容预设
+sheldon-vless     # sheldon 的兼容别名
+sheldon-anytls    # 高级选项，AnyTLS + Reality，客户端支持不全时不要优先用
 ```
 
 Sheldon 默认策略：
