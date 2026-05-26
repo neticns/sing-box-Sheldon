@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.12`
 >
-> 脚本版本：`v1.2.7`
+> 脚本版本：`v1.2.8`
 
 ## 功能特性
 
@@ -52,6 +52,12 @@
   - TCP / UDP / both 转发
   - 新增 / 删除 / 清空 / 应用规则
   - systemd 开机自动应用
+- Argo 隧道管理
+  - 安装/更新 cloudflared 最新版
+  - 支持 Cloudflare Quick Tunnel 临时隧道
+  - 支持 Named Tunnel Token 稳定隧道
+  - 本地服务仅允许 127.0.0.1 / localhost，减少误暴露
+  - systemd 资源限制与自动重启，提高安全伪装和稳定性
 
 ## 自动补依赖
 
@@ -110,7 +116,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.7]
+        [sing-box Sheldon 管理系统 V1.2.8]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
@@ -121,8 +127,9 @@ sudo ./sing-box-sheldon.sh
     5. WARP 分流
     6. 用户管理
     7. 端口转发管理
-    8. 命令菜单
-    9. 卸载 sing-box
+    8. Argo 隧道管理
+    9. 命令菜单
+    10. 卸载 sing-box
     0. 退出系统
 ------------------------------------------------------------
 请选择操作指令:
@@ -148,6 +155,8 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh relay        # 中转管理
 ./sing-box-sheldon.sh pf           # 端口转发管理
 ./sing-box-sheldon.sh forward      # 端口转发管理
+./sing-box-sheldon.sh argo        # Argo 隧道管理
+./sing-box-sheldon.sh argo-status # 查看 Argo 状态
 sp                            # 直接召唤脚本菜单
 ./sing-box-sheldon.sh sp           # 同样打开脚本菜单
 ```
@@ -221,6 +230,30 @@ sheldon
 sheldon-vless
 anytls-reality
 vless-reality
+```
+
+## v1.2.8 Argo 隧道安全伪装
+
+主菜单新增 `8. Argo 隧道管理`。
+
+功能：
+
+- 自动安装/更新 `cloudflared` 最新版。
+- 支持 Quick Tunnel：适合临时测试，会生成 `trycloudflare.com` 临时域名。
+- 支持 Named Tunnel Token：适合长期稳定使用，可绑定 Cloudflare 域名。
+- 本地服务地址只允许 `127.0.0.1` / `localhost`，避免误把内网或公网服务暴露。
+- systemd 服务默认启用自动重启、资源限制、`NoNewPrivileges`、`ProtectSystem`、`ProtectHome` 等安全参数。
+- 建议协议层继续使用 `sheldon` / `sheldon-vless`，隧道层用 Argo 隐藏源站 IP。
+
+命令：
+
+```bash
+./sing-box-sheldon.sh argo          # 打开 Argo 隧道菜单
+./sing-box-sheldon.sh argo-update   # 安装/更新 cloudflared
+./sing-box-sheldon.sh argo-start    # 启动临时 Quick Tunnel
+./sing-box-sheldon.sh argo-token    # 启动 Named Tunnel Token
+./sing-box-sheldon.sh argo-status   # 查看状态/日志
+./sing-box-sheldon.sh argo-stop     # 停止隧道
 ```
 
 ## 命令菜单

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.7
+# Version: 1.2.8
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.7"
+SCRIPT_VERSION="1.2.8"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -15,6 +15,11 @@ BIN_PATH="/usr/local/bin/sing-box"
 SCRIPT_PATH="/usr/local/bin/sing-box-sheldon"
 SP_PATH="/usr/local/bin/sp"
 PF_FILE="$SINGBOX_DIR/port_forward.rules"
+ARGO_DIR="$SINGBOX_DIR/argo"
+ARGO_BIN="/usr/local/bin/cloudflared"
+ARGO_SERVICE="cloudflared-sheldon"
+ARGO_CONFIG="$ARGO_DIR/config.yml"
+ARGO_INFO="$ARGO_DIR/tunnel.info"
 
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033[36m'; WHITE='\033[37m'; NC='\033[0m'
 BOLD='\033[1m'
@@ -92,6 +97,7 @@ _ensure_core_deps() {
   _ensure_cmd uuidgen uuid-runtime util-linux || true
   _ensure_cmd base64 coreutils || true
   _ensure_cmd openssl openssl || true
+  _ensure_cmd nohup coreutils || true
   if ! _has curl && _has wget; then _warn "curl 不可用，将使用 wget 下载"; fi
   return 0
 }
@@ -872,6 +878,231 @@ _logs() {
 }
 
 
+
+_argo_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    armv7l|armv7*) echo arm ;;
+    *) echo amd64 ;;
+  esac
+}
+
+_install_cloudflared() {
+  _need_root
+  _ensure_core_deps >/dev/null 2>&1 || true
+  local force="${1:-}" arch url tmp oldv newv
+  if [ -x "$ARGO_BIN" ] && [ "$force" != "force" ]; then
+    _ok "cloudflared 已安装: $($ARGO_BIN --version 2>/dev/null | head -1)"
+    echo "如需强制更新，可在 Argo 菜单选择安装/更新，或执行: sing-box-sheldon argo-update"
+    return 0
+  fi
+  arch="$(_argo_arch)"
+  tmp="/tmp/cloudflared-${arch}.$$"
+  url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
+  oldv="$($ARGO_BIN --version 2>/dev/null | head -1 || true)"
+  _warn "正在下载 cloudflared 最新版: $arch"
+  _fetch "$url" "$tmp" || { _err "cloudflared 下载失败"; rm -f "$tmp"; return 1; }
+  install -m 755 "$tmp" "$ARGO_BIN" 2>/dev/null || { cp "$tmp" "$ARGO_BIN" && chmod +x "$ARGO_BIN"; }
+  rm -f "$tmp"
+  newv="$($ARGO_BIN --version 2>/dev/null | head -1 || true)"
+  [ -n "$oldv" ] && echo "旧版本: $oldv"
+  _ok "cloudflared 安装/更新完成: ${newv:-unknown}"
+}
+
+_argo_pick_local_url() {
+  local port
+  if [ -s "$USER_FILE" ] && _has jq; then
+    port=$(jq -r '.users[]? | select(.status=="开启") | .port' "$USER_FILE" 2>/dev/null | head -1)
+  fi
+  if [ -n "$port" ] && [ "$port" != "null" ]; then echo "http://127.0.0.1:${port}"; else echo "http://127.0.0.1:8080"; fi
+}
+
+_argo_validate_url() {
+  local url="$1"
+  case "$url" in
+    http://127.0.0.1:*|http://localhost:*|http://[::1]:*) return 0 ;;
+    https://127.0.0.1:*|https://localhost:*|https://[::1]:*) return 0 ;;
+    *)
+      _err "为避免误把内网/公网服务暴露出去，Argo 本地地址只允许 127.0.0.1 / localhost。"
+      echo "示例: http://127.0.0.1:8080"
+      return 1
+      ;;
+  esac
+}
+
+_argo_service_install_quick() {
+  local url="$1"
+  mkdir -p "$ARGO_DIR"
+  cat >"$ARGO_CONFIG" <<EOF
+# sing-box Sheldon Argo quick tunnel
+# 仅监听本机 127.0.0.1，不额外暴露公网端口
+url: ${url}
+no-autoupdate: true
+edge-ip-version: auto
+protocol: quic
+loglevel: warn
+retries: 5
+EOF
+  if _has systemctl; then
+    cat >"/etc/systemd/system/${ARGO_SERVICE}.service" <<EOF
+[Unit]
+Description=Cloudflare Tunnel for sing-box Sheldon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${ARGO_BIN} tunnel --config ${ARGO_CONFIG}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+MemoryAccounting=true
+MemoryMax=96M
+CPUAccounting=true
+CPUQuota=60%
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now "$ARGO_SERVICE" >/dev/null 2>&1 || true
+  else
+    nohup "$ARGO_BIN" tunnel --config "$ARGO_CONFIG" >"$ARGO_DIR/quick.log" 2>&1 &
+    echo $! >"$ARGO_DIR/quick.pid"
+  fi
+}
+
+_argo_start_quick() {
+  _need_root
+  _install_cloudflared || return 1
+  local url log public
+  read -r -p "本地服务地址 [自动选择第一个用户端口]: " url
+  url="${url:-$(_argo_pick_local_url)}"
+  _argo_validate_url "$url" || return 1
+  mkdir -p "$ARGO_DIR"
+  _argo_service_install_quick "$url"
+  sleep 4
+  log="$ARGO_DIR/quick.log"
+  if _has journalctl && _has systemctl; then
+    journalctl -u "$ARGO_SERVICE" -n 80 --no-pager > "$log" 2>/dev/null || true
+  fi
+  public=$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$log" 2>/dev/null | tail -1 || true)
+  [ -n "$public" ] && echo "quick_url=$public" > "$ARGO_INFO"
+  _ok "Argo Quick Tunnel 已启动"
+  echo "本地地址: $url"
+  [ -n "$public" ] && echo "临时隧道: $public" || echo "临时域名生成中，可稍后在日志查看。"
+  _warn "Quick Tunnel 是临时域名，重启可能变化；长期稳定请用 Cloudflare Named Tunnel Token。"
+}
+
+_argo_token_service() {
+  local token="$1"
+  mkdir -p "$ARGO_DIR"
+  chmod 700 "$ARGO_DIR" 2>/dev/null || true
+  printf '%s\n' "$token" > "$ARGO_DIR/token"
+  chmod 600 "$ARGO_DIR/token" 2>/dev/null || true
+  if _has systemctl; then
+    cat >"/etc/systemd/system/${ARGO_SERVICE}.service" <<EOF
+[Unit]
+Description=Cloudflare Named Tunnel for sing-box Sheldon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=${ARGO_DIR}/token
+ExecStart=${ARGO_BIN} tunnel --no-autoupdate run --token \${TUNNEL_TOKEN}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+MemoryAccounting=true
+MemoryMax=96M
+CPUAccounting=true
+CPUQuota=60%
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now "$ARGO_SERVICE" >/dev/null 2>&1 || true
+  else
+    nohup env "$(cat "$ARGO_DIR/token")" "$ARGO_BIN" tunnel --no-autoupdate run --token "${token#TUNNEL_TOKEN=}" >"$ARGO_DIR/named.log" 2>&1 &
+    echo $! >"$ARGO_DIR/named.pid"
+  fi
+}
+
+_argo_start_token() {
+  _need_root
+  _install_cloudflared || return 1
+  local token
+  echo "粘贴 Cloudflare Tunnel Token。脚本只保存到本机 $ARGO_DIR/token，不会输出。"
+  read -r -s -p "Tunnel Token: " token; echo
+  [ -n "$token" ] || { _err "Token 不能为空"; return 1; }
+  case "$token" in TUNNEL_TOKEN=*) ;; *) token="TUNNEL_TOKEN=$token" ;; esac
+  _argo_token_service "$token"
+  _ok "Named Tunnel 已启动"
+  _warn "如需域名伪装，请在 Cloudflare Zero Trust 里把 Public Hostname 指向本机服务端口。"
+}
+
+_argo_status() {
+  if _has systemctl; then systemctl status "$ARGO_SERVICE" --no-pager || true; fi
+  [ -f "$ARGO_INFO" ] && cat "$ARGO_INFO"
+  [ -f "$ARGO_DIR/quick.log" ] && tail -n 30 "$ARGO_DIR/quick.log"
+  [ -f "$ARGO_DIR/named.log" ] && tail -n 30 "$ARGO_DIR/named.log"
+}
+
+_argo_stop() {
+  _need_root
+  if _has systemctl; then systemctl disable --now "$ARGO_SERVICE" >/dev/null 2>&1 || true; rm -f "/etc/systemd/system/${ARGO_SERVICE}.service"; systemctl daemon-reload || true; fi
+  [ -f "$ARGO_DIR/quick.pid" ] && kill "$(cat "$ARGO_DIR/quick.pid")" >/dev/null 2>&1 || true
+  [ -f "$ARGO_DIR/named.pid" ] && kill "$(cat "$ARGO_DIR/named.pid")" >/dev/null 2>&1 || true
+  rm -f "$ARGO_DIR/quick.pid" "$ARGO_DIR/named.pid"
+  _ok "Argo 隧道已停止"
+}
+
+_argo_menu() {
+  while true; do
+    clear
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${BOLD}${WHITE}                    Argo 隧道管理${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${GREEN}用途: 使用 Cloudflare Tunnel 隐藏源站 IP，提高安全伪装。${NC}"
+    echo -e "${YELLOW}建议: 长期稳定用 Named Tunnel；临时测试用 Quick Tunnel。${NC}"
+    echo
+    echo -e "    ${BLUE}1.${NC} ${GREEN}安装/更新 cloudflared 最新版${NC}"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}启动临时 Argo Quick Tunnel${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}启动 Named Tunnel Token${NC}"
+    echo -e "    ${BLUE}4.${NC} ${GREEN}查看 Argo 状态/日志${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}停止 Argo 隧道${NC}"
+    echo -e "    ${BLUE}6.${NC} ${GREEN}安全伪装说明${NC}"
+    echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    read -r -p "请选择操作: " c
+    case "$c" in
+      1) _install_cloudflared force; _pause ;;
+      2) _argo_start_quick; _pause ;;
+      3) _argo_start_token; _pause ;;
+      4) _argo_status; _pause ;;
+      5) _argo_stop; _pause ;;
+      6)
+        echo "Argo/Cloudflare Tunnel 安全伪装："
+        echo "- 入口走 Cloudflare 边缘网络，源站 IP 不直接暴露。"
+        echo "- 本地服务建议只监听 127.0.0.1 或防火墙限制来源。"
+        echo "- Named Tunnel 可绑定自己的域名并启用 Cloudflare TLS/WAF/Access。"
+        echo "- Quick Tunnel 适合测试，域名临时，不建议长期使用。"
+        echo "- Argo 只是隧道层；协议层仍推荐 sheldon / sheldon-vless。"
+        _pause ;;
+      0) break ;;
+    esac
+  done
+}
+
 _user_menu() {
   while true; do
     clear
@@ -952,6 +1183,8 @@ _command_menu() {
         echo "sing-box-sheldon logs               查看日志"
         echo "sing-box-sheldon restart            重启 sing-box"
         echo "sing-box-sheldon status             查看服务状态"
+        echo "sing-box-sheldon argo               Argo 隧道管理"
+        echo "sing-box-sheldon argo-status        查看 Argo 状态"
         _pause
         ;;
       0) break ;;
@@ -975,8 +1208,9 @@ _main_menu() {
     echo -e "    ${BLUE}5.${NC} ${GREEN}WARP 分流${NC}"
     echo -e "    ${BLUE}6.${NC} ${GREEN}用户管理${NC}"
     echo -e "    ${BLUE}7.${NC} ${GREEN}端口转发管理${NC}"
-    echo -e "    ${BLUE}8.${NC} ${GREEN}命令菜单${NC}"
-    echo -e "    ${BLUE}9.${NC} ${GREEN}卸载 sing-box${NC}"
+    echo -e "    ${BLUE}8.${NC} ${GREEN}Argo 隧道管理${NC}"
+    echo -e "    ${BLUE}9.${NC} ${GREEN}命令菜单${NC}"
+    echo -e "    ${BLUE}10.${NC} ${GREEN}卸载 sing-box${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}退出系统${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     read -r -p "请选择操作指令: " choice
@@ -988,8 +1222,9 @@ _main_menu() {
       5) _warp_menu; _pause ;;
       6) _user_menu ;;
       7) _port_forward_menu ;;
-      8) _command_menu ;;
-      9) _uninstall_all; _pause ;;
+      8) _argo_menu ;;
+      9) _command_menu ;;
+      10) _uninstall_all; _pause ;;
       0) exit 0 ;;
     esac
   done
@@ -1006,6 +1241,12 @@ _cli() {
     port-forward|forward|pf) _port_forward_menu ;;
     port-forward-apply) _port_forward_apply ;;
     warp) _warp_menu ;;
+    argo|tunnel|cloudflared) _argo_menu ;;
+    argo-update) _install_cloudflared force ;;
+    argo-start) _argo_start_quick ;;
+    argo-token) _argo_start_token ;;
+    argo-status) _argo_status ;;
+    argo-stop) _argo_stop ;;
     uninstall) _uninstall_all ;;
     restart) _service restart ;;
     start) _service start ;;
