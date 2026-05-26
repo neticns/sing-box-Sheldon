@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.11
+# Version: 1.2.12
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.11"
+SCRIPT_VERSION="1.2.12"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -112,6 +112,11 @@ _fetch() {
     wget -O "$out" --tries=3 --timeout=30 "$url" && return 0
   fi
   return 1
+}
+
+# 兼容旧调用名，脚本自更新和后续下载统一走这里。
+_download() {
+  _fetch "$@"
 }
 
 _install_script_shortcut() {
@@ -907,7 +912,7 @@ _update_script_self() {
   [ -n "$target" ] || target="$SCRIPT_PATH"
   tmp="$(mktemp /tmp/sing-box-sheldon.XXXXXX)" || return 1
   _ok "正在下载最新脚本..."
-  if _download "$SCRIPT_UPDATE_URL" "$tmp"; then
+  if _fetch "$SCRIPT_UPDATE_URL" "$tmp"; then
     bash -n "$tmp" || { rm -f "$tmp"; _err "下载的新脚本语法检查失败，已取消更新"; return 1; }
     mkdir -p "$(dirname "$target")"
     [ -s "$target" ] && { bak="${target}.bak.$(date +%Y%m%d%H%M%S)"; cp -f "$target" "$bak" 2>/dev/null || true; }
