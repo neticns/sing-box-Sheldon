@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.10
+# Version: 1.2.11
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.10"
+SCRIPT_VERSION="1.2.11"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -14,6 +14,7 @@ SERVICE_NAME="sing-box"
 BIN_PATH="/usr/local/bin/sing-box"
 SCRIPT_PATH="/usr/local/bin/sing-box-sheldon"
 SP_PATH="/usr/local/bin/sp"
+SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/neticns/sing-box-Sheldon/main/sing-box-sheldon.sh"
 PF_FILE="$SINGBOX_DIR/port_forward.rules"
 ARGO_DIR="$SINGBOX_DIR/argo"
 ARGO_BIN="/usr/local/bin/cloudflared"
@@ -894,6 +895,36 @@ EOF
   _ok "已应用 BBR/内核/服务优化"
 }
 
+_update_script_self() {
+  _need_root
+  _ensure_core_deps || { _err "依赖安装失败"; return 1; }
+  local current target tmp bak
+  current="$(_realpath_self)"
+  case "$current" in
+    /usr/local/bin/sing-box-sheldon|/usr/local/bin/sp) target="$SCRIPT_PATH" ;;
+    *) target="$current" ;;
+  esac
+  [ -n "$target" ] || target="$SCRIPT_PATH"
+  tmp="$(mktemp /tmp/sing-box-sheldon.XXXXXX)" || return 1
+  _ok "正在下载最新脚本..."
+  if _download "$SCRIPT_UPDATE_URL" "$tmp"; then
+    bash -n "$tmp" || { rm -f "$tmp"; _err "下载的新脚本语法检查失败，已取消更新"; return 1; }
+    mkdir -p "$(dirname "$target")"
+    [ -s "$target" ] && { bak="${target}.bak.$(date +%Y%m%d%H%M%S)"; cp -f "$target" "$bak" 2>/dev/null || true; }
+    install -m 755 "$tmp" "$target"
+    rm -f "$tmp"
+    ln -sf "$target" "$SCRIPT_PATH" 2>/dev/null || true
+    ln -sf "$SCRIPT_PATH" "$SP_PATH" 2>/dev/null || true
+    _ok "脚本已更新: $target"
+    [ -n "${bak:-}" ] && echo "备份: $bak"
+    echo "重新输入 sp 可进入新版菜单"
+  else
+    rm -f "$tmp"
+    _err "下载最新脚本失败"
+    return 1
+  fi
+}
+
 _install_update() {
   _need_root
   _ensure_core_deps || { _err "依赖安装失败"; return; }
@@ -1232,6 +1263,7 @@ _command_menu() {
       9)
         echo
         echo "sp                                  打开主菜单"
+        echo "sing-box-sheldon script-update      更新 Sheldon 脚本"
         echo "sing-box-sheldon install            安装/更新 sing-box"
         echo "sing-box-sheldon doctor             自检服务器是否可用"
         echo "sing-box-sheldon lowmem             应用省内存轻量配置"
@@ -1267,7 +1299,8 @@ _main_menu() {
     echo -e "    ${BLUE}7.${NC} ${GREEN}端口转发管理${NC}"
     echo -e "    ${BLUE}8.${NC} ${GREEN}Argo 隧道管理${NC}"
     echo -e "    ${BLUE}9.${NC} ${GREEN}命令菜单${NC}"
-    echo -e "    ${BLUE}10.${NC} ${GREEN}卸载 sing-box${NC}"
+    echo -e "    ${BLUE}10.${NC} ${GREEN}更新脚本${NC}"
+    echo -e "    ${BLUE}11.${NC} ${GREEN}卸载 sing-box${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}退出系统${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     read -r -p "请选择操作指令: " choice
@@ -1281,7 +1314,8 @@ _main_menu() {
       7) _port_forward_menu ;;
       8) _argo_menu ;;
       9) _command_menu ;;
-      10) _uninstall_all; _pause ;;
+      10) _update_script_self; _pause ;;
+      11) _uninstall_all; _pause ;;
       0) exit 0 ;;
     esac
   done
@@ -1289,6 +1323,7 @@ _main_menu() {
 
 _cli() {
   case "${1:-}" in
+    script-update|self-update|update-script) _update_script_self ;;
     install|update) _install_update ;;
     latest) _sync_latest_version; echo "$SINGBOX_VERSION" ;;
     optimize) _optimize_system ;;

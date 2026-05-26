@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.12`
 >
-> 脚本版本：`v1.2.10`
+> 脚本版本：`v1.2.11`
 
 ## 功能特性
 
@@ -120,7 +120,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.10]
+        [sing-box Sheldon 管理系统 V1.2.11]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
@@ -133,7 +133,8 @@ sudo ./sing-box-sheldon.sh
     7. 端口转发管理
     8. Argo 隧道管理
     9. 命令菜单
-    10. 卸载 sing-box
+    10. 更新脚本
+    11. 卸载 sing-box
     0. 退出系统
 ------------------------------------------------------------
 请选择操作指令:
@@ -144,6 +145,7 @@ sudo ./sing-box-sheldon.sh
 除了交互菜单，也可以直接执行命令：
 
 ```bash
+./sing-box-sheldon.sh script-update # 更新 Sheldon 脚本本身
 ./sing-box-sheldon.sh install      # 安装/更新 sing-box
 ./sing-box-sheldon.sh optimize     # 应用性能/省内存优化
 ./sing-box-sheldon.sh lowmem       # 只应用轻量配置优化
@@ -187,6 +189,34 @@ sp
 ```text
 /usr/local/bin/sing-box-sheldon
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
+```
+
+## v1.2.11 主菜单更新脚本
+
+主菜单新增：
+
+```text
+10. 更新脚本
+11. 卸载 sing-box
+```
+
+`更新脚本` 只更新 `sing-box Sheldon` 脚本本身，不等于更新 sing-box 核心。
+
+功能：
+
+- 从 GitHub raw 拉取最新 `sing-box-sheldon.sh`。
+- 下载后先执行 `bash -n` 语法检查。
+- 自动备份旧脚本为 `.bak.时间戳`。
+- 自动恢复/创建：
+  - `/usr/local/bin/sing-box-sheldon`
+  - `/usr/local/bin/sp`
+
+命令：
+
+```bash
+sing-box-sheldon script-update
+sing-box-sheldon self-update
+sing-box-sheldon update-script
 ```
 
 ## v1.2.10 Sheldon 连接修复
