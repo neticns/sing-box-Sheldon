@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.12`
 >
-> 脚本版本：`v1.2.8`
+> 脚本版本：`v1.2.9`
 
 ## 功能特性
 
@@ -14,6 +14,10 @@
   - 删除用户
   - 查看用户套餐、重置日、到期时间
   - 导出节点链接
+- 协议管理
+  - 查看支持协议/防封说明
+  - 直接创建新协议入站，不必添加用户
+  - 协议入站不进入用户/套餐/流量表，适合快速开独立节点
 - 支持常用与新型防封协议
   - Sheldon 协议：脚本自创高安全预设，基于 AnyTLS + Reality + 公共站点伪装 + NTP
   - Sheldon VLESS：基于 VLESS Reality + Vision 的兼容预设
@@ -116,13 +120,13 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.8]
+        [sing-box Sheldon 管理系统 V1.2.9]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
     1. 安装/更新 sing-box 最新稳定版
     2. 系统工具
-    3. 协议管理/支持说明
+    3. 协议管理
     4. 中转管理
     5. WARP 分流
     6. 用户管理
@@ -153,6 +157,8 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh logs         # 查看日志
 ./sing-box-sheldon.sh doctor       # 脚本自检/可用性检测
 ./sing-box-sheldon.sh relay        # 中转管理
+./sing-box-sheldon.sh proto        # 协议管理
+./sing-box-sheldon.sh create-protocol # 直接创建协议入站
 ./sing-box-sheldon.sh pf           # 端口转发管理
 ./sing-box-sheldon.sh forward      # 端口转发管理
 ./sing-box-sheldon.sh argo        # Argo 隧道管理
@@ -181,6 +187,32 @@ sp
 ```text
 /usr/local/bin/sing-box-sheldon
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
+```
+
+## v1.2.9 协议管理优化
+
+主菜单 `3. 协议管理` 现在支持数字操作：
+
+```text
+1. 查看支持协议/防封说明
+2. 直接创建新协议入站
+3. 检查 sing-box 配置
+0. 返回主菜单
+```
+
+说明：
+
+- `直接创建新协议入站` 不需要新增用户。
+- 会直接写入 sing-box `inbounds`，并输出节点链接。
+- 不进入用户表、套餐表、流量统计表。
+- 如果需要用户套餐/重置日/到期时间/流量管理，请继续使用 `用户管理 -> 新增用户`。
+- 推荐协议仍是 `sheldon`。
+
+命令：
+
+```bash
+./sing-box-sheldon.sh proto
+./sing-box-sheldon.sh create-protocol
 ```
 
 ## v1.2.7 Sheldon 协议预设

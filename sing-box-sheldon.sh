@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.8
+# Version: 1.2.9
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.8"
+SCRIPT_VERSION="1.2.9"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -766,6 +766,35 @@ _add_user() {
   echo "密码: $pass"
 }
 
+_create_protocol_only() {
+  _init_dirs
+  echo -e "${CYAN}直接创建协议入站，不写入用户/套餐表。${NC}"
+  echo -e "${YELLOW}推荐协议: sheldon；如需用户流量/套餐统计，请走 用户管理 -> 新增用户。${NC}"
+  echo -e "${CYAN}支持协议: sheldon/sheldon-vless/vless-reality/anytls-reality/vless/vmess/trojan/hysteria2/tuic/shadowsocks/anytls/socks${NC}"
+  local name proto port uuid pass tag host
+  read -r -p "协议备注 [sheldon]: " name; name="${name:-sheldon}"
+  read -r -p "协议 [sheldon]: " proto; proto="${proto:-sheldon}"
+  read -r -p "监听端口: " port
+  [[ "$port" =~ ^[0-9]+$ ]] || { _err "端口错误"; return; }
+  if _has ss && ss -lntup 2>/dev/null | grep -q ":$port "; then _err "端口已占用"; return; fi
+  uuid="$(_generate_uuid)"; pass="$(_rand_pass)"; tag="proto-${name}-${port}"
+  tag=$(echo "$tag" | tr -cs 'A-Za-z0-9_.-' '-')
+  _add_inbound_json "$proto" "$tag" "$port" "$uuid" "$pass" || return
+  _open_firewall_port "$port" tcp
+  case "$proto" in hysteria2|hy2|tuic) _open_firewall_port "$port" udp ;; esac
+  _check_config || { _err "配置检查失败，已写入但未重启，请手动修正"; return; }
+  _service restart >/dev/null 2>&1 || true
+  host=$(_get_public_ip)
+  _ok "协议入站已创建，不占用户表"
+  echo "备注: $name"
+  echo "协议: $proto"
+  echo "端口: $port"
+  echo "UUID: $uuid"
+  echo "密码: $pass"
+  echo "节点链接:"
+  _build_share_link "$name" "$proto" "$host" "$port" "$uuid" "$pass" "$LAST_REALITY_PUBLIC" "$LAST_REALITY_SHORT_ID" "$LAST_REALITY_SNI" "$LAST_REALITY_ALPN"
+}
+
 _delete_user() {
   _table_users
   read -r -p "要删除的用户名: " name
@@ -778,15 +807,8 @@ _delete_user() {
   _ok "已删除 $name"
 }
 
-_export_user() {
-  _jq
-  read -r -p "用户名: " name
-  local row proto port uuid pass host pbk sid sni alpn
-  row=$(jq -c --arg name "$name" '.users[]? | select(.name==$name)' "$USER_FILE")
-  [ -n "$row" ] || { _err "用户不存在"; return; }
-  proto=$(echo "$row" | jq -r .protocol); port=$(echo "$row" | jq -r .port); uuid=$(echo "$row" | jq -r .uuid); pass=$(echo "$row" | jq -r .password)
-  pbk=$(echo "$row" | jq -r '.reality_public_key // ""'); sid=$(echo "$row" | jq -r '.reality_short_id // ""'); sni=$(echo "$row" | jq -r '.reality_server_name // "www.microsoft.com"'); alpn=$(echo "$row" | jq -r '.reality_alpn // "h2,http/1.1"')
-  host=$(curl -4 -s --max-time 5 https://api.ipify.org || hostname -I | awk '{print $1}')
+_build_share_link() {
+  local name="$1" proto="$2" host="$3" port="$4" uuid="$5" pass="$6" pbk="${7:-}" sid="${8:-}" sni="${9:-www.microsoft.com}" alpn="${10:-h2,http/1.1}"
   case "$proto" in
     vless) echo "vless://${uuid}@${host}:${port}?type=tcp&security=none#${name}" ;;
     vless-reality|reality|sheldon-vless) echo "vless://${uuid}@${host}:${port}?type=tcp&security=reality&sni=${sni}&pbk=${pbk}&sid=${sid}&fp=chrome&alpn=${alpn}&flow=xtls-rprx-vision#${name}" ;;
@@ -799,6 +821,18 @@ _export_user() {
     anytls-reality|any-reality|sheldon|sheldon-reality) echo "anytls://${pass}@${host}:${port}?security=reality&sni=${sni}&pbk=${pbk}&sid=${sid}&fp=chrome&alpn=${alpn}#${name}" ;;
     socks) echo "socks5://user:${pass}@${host}:${port}#${name}" ;;
   esac
+}
+
+_export_user() {
+  _jq
+  read -r -p "用户名: " name
+  local row proto port uuid pass host pbk sid sni alpn
+  row=$(jq -c --arg name "$name" '.users[]? | select(.name==$name)' "$USER_FILE")
+  [ -n "$row" ] || { _err "用户不存在"; return; }
+  proto=$(echo "$row" | jq -r .protocol); port=$(echo "$row" | jq -r .port); uuid=$(echo "$row" | jq -r .uuid); pass=$(echo "$row" | jq -r .password)
+  pbk=$(echo "$row" | jq -r '.reality_public_key // ""'); sid=$(echo "$row" | jq -r '.reality_short_id // ""'); sni=$(echo "$row" | jq -r '.reality_server_name // "www.microsoft.com"'); alpn=$(echo "$row" | jq -r '.reality_alpn // "h2,http/1.1"')
+  host=$(_get_public_ip)
+  _build_share_link "$name" "$proto" "$host" "$port" "$uuid" "$pass" "$pbk" "$sid" "$sni" "$alpn"
 }
 
 
@@ -1127,7 +1161,7 @@ _user_menu() {
   done
 }
 
-_proto_menu() {
+_proto_support_text() {
   echo -e "${CYAN}当前脚本支持 sing-box v${SINGBOX_VERSION} 常用新协议:${NC}"
   echo "- Sheldon 协议：脚本自创安全预设，实际为 AnyTLS + Reality + 公共站点伪装 + fp=chrome + NTP"
   echo "- Sheldon VLESS：VLESS + Reality + Vision + 公共站点伪装"
@@ -1140,6 +1174,28 @@ _proto_menu() {
   echo "推荐优先级: sheldon > sheldon-vless > anytls-reality > vless-reality。"
   echo "默认安全策略: Reality 公共站点握手伪装、fp=chrome、ALPN=h2/http1.1、NTP 自动校时、log=error、关闭 cache_file。"
   echo "说明: Sheldon 是 sing-box Sheldon 的高安全配置预设，不魔改 sing-box 核心，客户端兼容性更好。"
+  echo "新增: 可直接创建协议入站，不需要添加用户；但不进入用户/套餐/流量表。"
+}
+
+_proto_menu() {
+  while true; do
+    clear
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${BOLD}${WHITE}                    协议管理${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "    ${BLUE}1.${NC} ${GREEN}查看支持协议/防封说明${NC}"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}直接创建新协议入站${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}检查 sing-box 配置${NC}"
+    echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    read -r -p "请选择操作: " c
+    case "$c" in
+      1) _proto_support_text; _pause ;;
+      2) _create_protocol_only; _pause ;;
+      3) _check_config; _pause ;;
+      0) break ;;
+    esac
+  done
 }
 
 
@@ -1217,7 +1273,7 @@ _main_menu() {
     case "$choice" in
       1) _install_update; _pause ;;
       2) _system_tools_menu ;;
-      3) _proto_menu; _pause ;;
+      3) _proto_menu ;;
       4) _relay_menu; _pause ;;
       5) _warp_menu; _pause ;;
       6) _user_menu ;;
@@ -1241,6 +1297,8 @@ _cli() {
     port-forward|forward|pf) _port_forward_menu ;;
     port-forward-apply) _port_forward_apply ;;
     warp) _warp_menu ;;
+    proto|protocol) _proto_menu ;;
+    create-protocol|add-protocol) _create_protocol_only ;;
     argo|tunnel|cloudflared) _argo_menu ;;
     argo-update) _install_cloudflared force ;;
     argo-start) _argo_start_quick ;;
