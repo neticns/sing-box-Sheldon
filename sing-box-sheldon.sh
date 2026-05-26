@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.4
+# Version: 1.2.6
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.4"
+SCRIPT_VERSION="1.2.6"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -167,6 +167,54 @@ _generate_reality_keypair() {
   _warn "sing-box 未安装，安装核心后可生成 Reality 密钥"
 }
 
+_generate_reality_material() {
+  local out bin sid profile alpn
+  bin="$BIN_PATH"; _has sing-box && bin="$(command -v sing-box)"
+  [ -x "$bin" ] || { _err "Reality 协议需要先安装 sing-box 核心"; return 1; }
+  out="$($bin generate reality-keypair 2>/dev/null)" || return 1
+  REALITY_PRIVATE=$(printf '%s
+' "$out" | awk -F': ' '/PrivateKey/{print $2; exit}')
+  REALITY_PUBLIC=$(printf '%s
+' "$out" | awk -F': ' '/PublicKey/{print $2; exit}')
+  sid=$(tr -dc 'a-f0-9' </dev/urandom | head -c 16)
+  profile="$(_random_reality_profile)"
+  REALITY_HANDSHAKE_SERVER="${profile%%|*}"
+  profile="${profile#*|}"; REALITY_SERVER_NAME="${profile%%|*}"
+  alpn="${profile##*|}"
+  REALITY_ALPN="${alpn:-h2,http/1.1}"
+  REALITY_SHORT_ID="${sid:-0123456789abcdef}"
+  [ -n "$REALITY_PRIVATE" ] && [ -n "$REALITY_PUBLIC" ] || { _err "生成 Reality 密钥失败"; return 1; }
+}
+
+_random_reality_profile() {
+  # 默认使用真实大型站点作为 Reality 握手伪装；不需要自有域名/证书。
+  # 输出: server|sni|alpn_csv
+  local profiles idx
+  profiles="www.microsoft.com|www.microsoft.com|h2,http/1.1
+www.apple.com|www.apple.com|h2,http/1.1
+www.cloudflare.com|www.cloudflare.com|h2,http/1.1
+www.samsung.com|www.samsung.com|h2,http/1.1
+www.bing.com|www.bing.com|h2,http/1.1"
+  idx=$(awk -v max=5 'BEGIN{srand(); print int(rand()*max)+1}')
+  printf '%s
+' "$profiles" | sed -n "${idx}p"
+}
+
+_ensure_ntp_config() {
+  _jq
+  _init_dirs
+  local tmp="$CONFIG_FILE.tmp"
+  jq '
+    .ntp = ((.ntp // {}) + {
+      enabled: true,
+      server: "time.apple.com",
+      server_port: 123,
+      interval: "30m",
+      detour: "direct"
+    })
+  ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+}
+
 _generate_uuid() {
   if _has sing-box; then sing-box generate uuid 2>/dev/null && return; fi
   _rand_uuid
@@ -251,6 +299,7 @@ _migrate_config_latest() {
         else . end
       )
     else . end |
+    .ntp = ((.ntp // {}) + {enabled:true, server:"time.apple.com", server_port:123, interval:"30m", detour:"direct"}) |
     .route.default_domain_resolver = (.route.default_domain_resolver // ((.dns.servers[0].tag // "cf"))) |
     if (.dns.rules? | type) == "array" then
       .dns.rules |= map(del(.outbound, .domain_resolver))
@@ -473,6 +522,7 @@ _init_dirs() {
     cat > "$CONFIG_FILE" <<'JSON'
 {
   "log": {"disabled": false, "level": "error", "timestamp": false},
+  "ntp": {"enabled": true, "server": "time.apple.com", "server_port": 123, "interval": "30m", "detour": "direct"},
   "dns": {
     "servers": [
       {"tag": "cf", "type": "udp", "server": "1.1.1.1"},
@@ -599,9 +649,10 @@ _jq() { _has jq || _pkg_install jq; }
 _add_user_record() {
   _jq
   local name="$1" status="$2" plan="$3" reset="$4" expire="$5" port="$6" proto="$7" uuid="$8" pass="$9" tag="${10}"
+  local reality_public="${11:-}" reality_short_id="${12:-}" reality_sni="${13:-}" reality_alpn="${14:-}"
   local tmp="$USER_FILE.tmp"
-  jq --arg name "$name" --arg status "$status" --arg plan "$plan" --arg reset "$reset" --arg expire "$expire" --arg port "$port" --arg proto "$proto" --arg uuid "$uuid" --arg pass "$pass" --arg tag "$tag" \
-    '.users += [{name:$name,status:$status,upload:0,download:0,correct:0,plan:$plan,reset:$reset,expire:$expire,port:($port|tonumber),protocol:$proto,uuid:$uuid,password:$pass,tag:$tag,created:now|todate}]' \
+  jq --arg name "$name" --arg status "$status" --arg plan "$plan" --arg reset "$reset" --arg expire "$expire" --arg port "$port" --arg proto "$proto" --arg uuid "$uuid" --arg pass "$pass" --arg tag "$tag" --arg pbk "$reality_public" --arg sid "$reality_short_id" --arg sni "$reality_sni" --arg alpn "$reality_alpn" \
+    '.users += [{name:$name,status:$status,upload:0,download:0,correct:0,plan:$plan,reset:$reset,expire:$expire,port:($port|tonumber),protocol:$proto,uuid:$uuid,password:$pass,tag:$tag,reality_public_key:$pbk,reality_short_id:$sid,reality_server_name:$sni,reality_alpn:$alpn,created:now|todate}]' \
     "$USER_FILE" > "$tmp" && mv "$tmp" "$USER_FILE"
 }
 
@@ -632,9 +683,14 @@ _ensure_tls_cert() {
 _add_inbound_json() {
   _jq
   local proto="$1" tag="$2" port="$3" uuid="$4" pass="$5" tmp="$CONFIG_FILE.tmp" inbound
+  LAST_REALITY_PUBLIC=""; LAST_REALITY_SHORT_ID=""; LAST_REALITY_SNI=""; LAST_REALITY_ALPN=""
   case "$proto" in
     vless)
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg uuid "$uuid" '{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:false}}') ;;
+    vless-reality|reality)
+      _generate_reality_material || return 1
+      LAST_REALITY_PUBLIC="$REALITY_PUBLIC"; LAST_REALITY_SHORT_ID="$REALITY_SHORT_ID"; LAST_REALITY_SNI="$REALITY_SERVER_NAME"; LAST_REALITY_ALPN="$REALITY_ALPN"
+      inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg uuid "$uuid" --arg pk "$REALITY_PRIVATE" --arg sid "$REALITY_SHORT_ID" --arg sni "$REALITY_SERVER_NAME" --arg hs "$REALITY_HANDSHAKE_SERVER" '{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,alpn:["h2","http/1.1"],reality:{enabled:true,handshake:{server:$hs,server_port:443},private_key:$pk,short_id:[$sid]}}}') ;;
     vmess)
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg uuid "$uuid" '{type:"vmess",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid}],transport:{type:"tcp"}}') ;;
     trojan)
@@ -649,6 +705,10 @@ _add_inbound_json() {
       local ck cert key; ck="$(_ensure_tls_cert "${tag}-${port}")" || { _err "AnyTLS 需要 TLS 证书，且 openssl 不可用"; return 1; }
       cert="${ck%%|*}"; key="${ck##*|}"
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" --arg cert "$cert" --arg key "$key" '{type:"anytls",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pass}],tls:{enabled:true,certificate_path:$cert,key_path:$key}}' ) ;;
+    anytls-reality|any-reality)
+      _generate_reality_material || return 1
+      LAST_REALITY_PUBLIC="$REALITY_PUBLIC"; LAST_REALITY_SHORT_ID="$REALITY_SHORT_ID"; LAST_REALITY_SNI="$REALITY_SERVER_NAME"; LAST_REALITY_ALPN="$REALITY_ALPN"
+      inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" --arg pk "$REALITY_PRIVATE" --arg sid "$REALITY_SHORT_ID" --arg sni "$REALITY_SERVER_NAME" --arg hs "$REALITY_HANDSHAKE_SERVER" '{type:"anytls",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pass}],tls:{enabled:true,server_name:$sni,alpn:["h2","http/1.1"],reality:{enabled:true,handshake:{server:$hs,server_port:443},private_key:$pk,short_id:[$sid]}}}' ) ;;
     socks)
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" '{type:"socks",tag:$tag,listen:"::",listen_port:$port,users:[{username:"user",password:$pass}]}' ) ;;
     *) _err "不支持协议: $proto"; return 1 ;;
@@ -674,7 +734,7 @@ _table_users() {
 }
 
 _add_user() {
-  echo -e "${CYAN}支持协议: vless/vmess/trojan/hysteria2/tuic/shadowsocks/anytls/socks${NC}"
+  echo -e "${CYAN}支持协议: vless/vless-reality/vmess/trojan/hysteria2/tuic/shadowsocks/anytls/anytls-reality/socks${NC}"
   read -r -p "用户名: " name
   [ -n "$name" ] || { _err "用户名不能为空"; return; }
   read -r -p "协议 [vless]: " proto; proto="${proto:-vless}"
@@ -687,7 +747,7 @@ _add_user() {
   local uuid pass tag
   uuid="$(_generate_uuid)"; pass="$(_rand_pass)"; tag="user-$name"
   _add_inbound_json "$proto" "$tag" "$port" "$uuid" "$pass" || return
-  _add_user_record "$name" "开启" "$plan" "$reset" "$expire" "$port" "$proto" "$uuid" "$pass" "$tag"
+  _add_user_record "$name" "开启" "$plan" "$reset" "$expire" "$port" "$proto" "$uuid" "$pass" "$tag" "$LAST_REALITY_PUBLIC" "$LAST_REALITY_SHORT_ID" "$LAST_REALITY_SNI" "$LAST_REALITY_ALPN"
   _open_firewall_port "$port" tcp
   case "$proto" in hysteria2|hy2|tuic) _open_firewall_port "$port" udp ;; esac
   _check_config || { _err "配置检查失败，已写入但未重启，请手动修正"; return; }
@@ -714,19 +774,22 @@ _delete_user() {
 _export_user() {
   _jq
   read -r -p "用户名: " name
-  local row proto port uuid pass host
+  local row proto port uuid pass host pbk sid sni alpn
   row=$(jq -c --arg name "$name" '.users[]? | select(.name==$name)' "$USER_FILE")
   [ -n "$row" ] || { _err "用户不存在"; return; }
   proto=$(echo "$row" | jq -r .protocol); port=$(echo "$row" | jq -r .port); uuid=$(echo "$row" | jq -r .uuid); pass=$(echo "$row" | jq -r .password)
+  pbk=$(echo "$row" | jq -r '.reality_public_key // ""'); sid=$(echo "$row" | jq -r '.reality_short_id // ""'); sni=$(echo "$row" | jq -r '.reality_server_name // "www.microsoft.com"'); alpn=$(echo "$row" | jq -r '.reality_alpn // "h2,http/1.1"')
   host=$(curl -4 -s --max-time 5 https://api.ipify.org || hostname -I | awk '{print $1}')
   case "$proto" in
     vless) echo "vless://${uuid}@${host}:${port}?type=tcp&security=none#${name}" ;;
+    vless-reality|reality) echo "vless://${uuid}@${host}:${port}?type=tcp&security=reality&sni=${sni}&pbk=${pbk}&sid=${sid}&fp=chrome&alpn=${alpn}&flow=xtls-rprx-vision#${name}" ;;
     vmess) echo "vmess://$(printf '{"v":"2","ps":"%s","add":"%s","port":"%s","id":"%s","aid":"0","net":"tcp","type":"none","host":"","path":"","tls":""}' "$name" "$host" "$port" "$uuid" | base64 -w0)" ;;
     trojan) echo "trojan://${pass}@${host}:${port}#${name}" ;;
     hysteria2|hy2) echo "hy2://${pass}@${host}:${port}?insecure=1#${name}" ;;
     tuic) echo "tuic://${uuid}:${pass}@${host}:${port}?congestion_control=bbr&udp_relay_mode=native#${name}" ;;
     shadowsocks|ss) echo "ss://$(printf '2022-blake3-aes-128-gcm:%s' "$pass" | base64 -w0)@${host}:${port}#${name}" ;;
     anytls) echo "anytls://${pass}@${host}:${port}?insecure=1#${name}" ;;
+    anytls-reality|any-reality) echo "anytls://${pass}@${host}:${port}?security=reality&sni=${sni}&pbk=${pbk}&sid=${sid}&fp=chrome&alpn=${alpn}#${name}" ;;
     socks) echo "socks5://user:${pass}@${host}:${port}#${name}" ;;
   esac
 }
@@ -739,6 +802,7 @@ _optimize_config_light() {
   jq '
     .log = ((.log // {}) + {disabled:false, level:"error", timestamp:false}) |
     .experimental.cache_file.enabled = false |
+    .ntp = ((.ntp // {}) + {enabled:true, server:"time.apple.com", server_port:123, interval:"30m", detour:"direct"}) |
     .route.auto_detect_interface = false |
     .route.find_process = false |
     .route.default_domain_resolver = (.route.default_domain_resolver // ((.dns.servers[0].tag // "cf"))) |

@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.12`
 >
-> 脚本版本：`v1.2.4`
+> 脚本版本：`v1.2.6`
 
 ## 功能特性
 
@@ -14,20 +14,25 @@
   - 删除用户
   - 查看用户套餐、重置日、到期时间
   - 导出节点链接
-- 支持常用协议
+- 支持常用与新型防封协议
   - VLESS
+  - VLESS Reality
+  - Reality 公共站点伪装
   - VMess
   - Trojan
   - Hysteria2
   - TUIC
   - Shadowsocks 2022
   - AnyTLS
+  - AnyTLS Reality
+  - 导出链接自动带 `fp=chrome` / ALPN 参数
   - SOCKS5
 - 轻量化默认配置
-  - 日志级别默认 `warn`
+  - 日志级别默认 `error`
   - 关闭 `cache_file`
   - 不启用无用统计服务
   - 少写磁盘
+  - 内置 NTP 自动校时配置，降低 `Handshake failed` / `Time offset too large` 报错
 - 性能优化
   - BBR
   - TCP Fast Open
@@ -103,7 +108,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.4]
+        [sing-box Sheldon 管理系统 V1.2.6]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
@@ -165,6 +170,23 @@ sp
 ```text
 /usr/local/bin/sing-box-sheldon
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
+```
+
+## v1.2.6 防封协议、伪装与 NTP 校时
+
+新增/优化：
+
+- `anytls-reality`：AnyTLS + Reality，无需购买域名，无需自签名证书。
+- `vless-reality`：VLESS + Reality，适合无域名场景。
+- Reality 自动随机公共站点 SNI/握手目标，默认 `h2,http/1.1` ALPN，导出链接带 `fp=chrome`。
+- 新增配置文件 `ntp`：自动向高精度时间服务器校时。
+- 减少因时间偏移导致的常见报错：`Handshake failed`、`Time offset too large`。
+
+新增用户时协议可直接输入：
+
+```text
+anytls-reality
+vless-reality
 ```
 
 ## 命令菜单
@@ -310,12 +332,14 @@ sp
 
 ```text
 vless
+vless-reality
 vmess
 trojan
 hysteria2
 tuic
 shadowsocks
 anytls
+anytls-reality
 socks
 ```
 
@@ -374,9 +398,9 @@ net.ipv4.ip_local_port_range=1024 65535
 1. 脚本需要 `root` 权限。
 2. 新增用户前请确认端口没有被占用。
 3. Hysteria2 / TUIC 属于 UDP/QUIC 协议，服务器防火墙和服务商安全组需要放行 UDP。
-4. Shadowsocks 2022 对系统时间敏感，建议确保 NTP 正常。
+4. Shadowsocks 2022、Reality、AnyTLS Reality 都对系统时间敏感，脚本已默认写入 NTP 配置。
 5. 如果是 NAT VPS，请区分外部映射端口和服务器内部监听端口。
-6. 生产环境建议自行配置 TLS/Reality 证书和安全参数。
+6. Reality 默认随机使用公共站点作为握手伪装，并导出 `fp=chrome`/ALPN 参数；可按需自行调整 SNI/握手目标。
 
 ## 卸载
 
