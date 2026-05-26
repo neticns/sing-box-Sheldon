@@ -84,7 +84,6 @@ sudo ./sing-box-sheldon.sh
     5. 检查配置
     6. 重启 sing-box
     7. 查看日志
-    sp. 快捷发频道公告
     0. 退出系统
 ------------------------------------------------------------
 请选择操作指令:
@@ -103,37 +102,22 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh status       # 查看状态
 ./sing-box-sheldon.sh check        # 检查配置
 ./sing-box-sheldon.sh logs         # 查看日志
-./sing-box-sheldon.sh sp "公告内容" # 快捷发送 Telegram 频道公告
+./sing-box-sheldon.sh sp           # 快捷打开脚本菜单
 ```
 
-## 快捷公告 sp
+## 快捷菜单 sp
 
-`sp` 是 Telegram 频道/群组公告快捷键。
-
-交互菜单里直接输入：
-
-```text
-sp
-```
-
-命令行直接发送：
+`sp` 是脚本菜单快捷命令，等同于直接打开 `sing-box Sheldon` 管理菜单。
 
 ```bash
-./sing-box-sheldon.sh sp "📢 公告内容"
+./sing-box-sheldon.sh sp
 ```
 
-第一次使用会要求填写：
+也可以使用：
 
-- Bot Token
-- 频道/群组 ID 或 `@username`，默认可填 `@kucunn`
-
-配置保存到：
-
-```text
-/usr/local/etc/sing-box/telegram.conf
+```bash
+./sing-box-sheldon.sh menu
 ```
-
-以后再执行 `sp` 会自动读取配置发送。
 
 ## 配置文件路径
 

@@ -12,7 +12,6 @@ CONFIG_FILE="$SINGBOX_DIR/config.json"
 USER_FILE="$SINGBOX_DIR/users.json"
 SERVICE_NAME="sing-box"
 BIN_PATH="/usr/local/bin/sing-box"
-TG_CONFIG_FILE="$SINGBOX_DIR/telegram.conf"
 
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033[36m'; WHITE='\033[37m'; NC='\033[0m'
 BOLD='\033[1m'
@@ -322,54 +321,6 @@ _logs() {
   if _has journalctl; then journalctl -u sing-box -n 80 --no-pager; else tail -n 80 /var/log/sing-box.log /var/log/sing-box.err 2>/dev/null; fi
 }
 
-_tg_load_config() {
-  [ -f "$TG_CONFIG_FILE" ] && . "$TG_CONFIG_FILE"
-  TG_BOT_TOKEN="${TG_BOT_TOKEN:-${BOT_TOKEN:-}}"
-  TG_CHAT_ID="${TG_CHAT_ID:-${CHAT_ID:-}}"
-}
-
-_tg_save_config() {
-  mkdir -p "$SINGBOX_DIR"
-  cat > "$TG_CONFIG_FILE" <<EOF
-TG_BOT_TOKEN="$TG_BOT_TOKEN"
-TG_CHAT_ID="$TG_CHAT_ID"
-EOF
-  chmod 600 "$TG_CONFIG_FILE"
-}
-
-_tg_send() {
-  _tg_load_config
-  local text="$*"
-  [ -n "$text" ] || { _err "公告内容不能为空"; return 1; }
-  if [ -z "$TG_BOT_TOKEN" ]; then
-    read -r -p "Bot Token: " TG_BOT_TOKEN
-  fi
-  if [ -z "$TG_CHAT_ID" ]; then
-    read -r -p "频道/群组 ID 或 @username [@kucunn]: " TG_CHAT_ID
-    TG_CHAT_ID="${TG_CHAT_ID:-@kucunn}"
-  fi
-  _tg_save_config
-  _has curl || _pkg_install curl
-  local resp
-  resp=$(curl -sS --connect-timeout 10 --max-time 30 \
-    -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-    -d "chat_id=${TG_CHAT_ID}" \
-    --data-urlencode "text=${text}" \
-    -d "disable_web_page_preview=true")
-  echo "$resp" | grep -q '"ok":true' && _ok "公告已发送到 ${TG_CHAT_ID}" || { _err "发送失败: $resp"; return 1; }
-}
-
-_sp_announcement() {
-  if [ "$#" -gt 0 ]; then
-    _tg_send "$*"
-    return
-  fi
-  echo -e "${CYAN}快捷公告 sp：输入内容后发送到 Telegram 频道/群组${NC}"
-  echo -e "${YELLOW}提示：第一次会要求填写 Bot Token 和频道 ID，之后保存在 ${TG_CONFIG_FILE}${NC}"
-  read -r -p "公告内容: " text
-  _tg_send "$text"
-}
-
 
 _user_menu() {
   while true; do
@@ -422,7 +373,6 @@ _main_menu() {
     echo -e "    ${BLUE}5.${NC} ${GREEN}检查配置${NC}"
     echo -e "    ${BLUE}6.${NC} ${GREEN}重启 sing-box${NC}"
     echo -e "    ${BLUE}7.${NC} ${GREEN}查看日志${NC}"
-    echo -e "    ${BLUE}sp.${NC} ${GREEN}快捷发频道公告${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}退出系统${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     read -r -p "请选择操作指令: " choice
@@ -434,7 +384,6 @@ _main_menu() {
       5) _check_config; _pause ;;
       6) _service restart; _pause ;;
       7) _logs; _pause ;;
-      sp|SP) _sp_announcement; _pause ;;
       0) exit 0 ;;
     esac
   done
@@ -450,8 +399,7 @@ _cli() {
     status) _service status ;;
     check) _check_config ;;
     logs) _logs ;;
-    sp) shift; _sp_announcement "$@" ;;
-    send-post) shift; _sp_announcement "$@" ;;
+    menu|sp) _main_menu ;;
     add-user) shift; _add_user ;;
     export-user) shift; _export_user ;;
     *) _main_menu ;;
