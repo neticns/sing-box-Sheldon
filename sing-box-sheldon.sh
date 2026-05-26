@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.1
+# Version: 1.2.3
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.3"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -91,6 +91,7 @@ _ensure_core_deps() {
   _ensure_cmd ss iproute2 iproute iproute2-ss || true
   _ensure_cmd uuidgen uuid-runtime util-linux || true
   _ensure_cmd base64 coreutils || true
+  _ensure_cmd openssl openssl || true
   if ! _has curl && _has wget; then _warn "curl 不可用，将使用 wget 下载"; fi
   return 0
 }
@@ -194,6 +195,8 @@ _system_tools_menu() {
     echo -e "    ${BLUE}4.${NC} ${GREEN}查看系统信息${NC}"
     echo -e "    ${BLUE}5.${NC} ${GREEN}生成 UUID${NC}"
     echo -e "    ${BLUE}6.${NC} ${GREEN}生成 Reality 密钥对${NC}"
+    echo -e "    ${BLUE}7.${NC} ${GREEN}应用轻量配置优化${NC}"
+    echo -e "    ${BLUE}8.${NC} ${GREEN}脚本自检/可用性检测${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
     read -r -p "请选择操作: " c
     case "$c" in
@@ -203,11 +206,110 @@ _system_tools_menu() {
       4) uname -a; echo; free -h 2>/dev/null || true; df -h 2>/dev/null || true; _pause ;;
       5) _generate_uuid; _pause ;;
       6) _generate_reality_keypair; _pause ;;
+      7) _optimize_config_light; _pause ;;
+      8) _self_check; _pause ;;
       0) break ;;
     esac
   done
 }
 
+
+
+
+
+_repair_missing_tls_certs() {
+  _jq
+  [ -f "$CONFIG_FILE" ] || return 0
+  local pairs name cert key tmp
+  pairs=$(jq -r '.inbounds[]? | select(.tls.enabled == true) | [.tag, .tls.certificate_path, .tls.key_path] | @tsv' "$CONFIG_FILE" 2>/dev/null || true)
+  [ -n "$pairs" ] || return 0
+  while IFS=$'\t' read -r name cert key; do
+    [ -n "$name" ] || continue
+    if [ ! -s "$cert" ] || [ ! -s "$key" ]; then
+      if _has openssl; then
+        mkdir -p "$(dirname "$cert")" "$(dirname "$key")"
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+          -subj "/CN=sing-box-sheldon" \
+          -keyout "$key" -out "$cert" >/dev/null 2>&1 || true
+        chmod 600 "$key" 2>/dev/null || true
+      fi
+    fi
+  done <<EOF
+$pairs
+EOF
+}
+
+_migrate_config_latest() {
+  _jq
+  [ -f "$CONFIG_FILE" ] || return 0
+  local tmp="$CONFIG_FILE.tmp"
+  jq '
+    if (.dns.servers? | type) == "array" then
+      .dns.servers |= map(
+        if (.address? and (.type? | not)) then
+          .type = "udp" | .server = .address | del(.address)
+        else . end
+      )
+    else . end |
+    .route.default_domain_resolver = (.route.default_domain_resolver // ((.dns.servers[0].tag // "cf"))) |
+    if (.dns.rules? | type) == "array" then
+      .dns.rules |= map(del(.outbound, .domain_resolver))
+    else . end
+  ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+}
+
+_self_check() {
+  echo -e "${CYAN}sing-box Sheldon 自检${NC}"
+  echo "脚本版本: ${SCRIPT_VERSION}"
+  echo "系统架构: $(uname -m)"
+  echo "系统类型: $(_detect_os 2>/dev/null || echo unknown)"
+  echo
+  local ok=0 fail=0 warn=0
+  _check_item() {
+    local name="$1" cmd="$2" level="${3:-required}"
+    if eval "$cmd" >/dev/null 2>&1; then
+      echo -e "${GREEN}✓${NC} $name"
+      ok=$((ok+1))
+    else
+      if [ "$level" = "warn" ]; then
+        echo -e "${YELLOW}!${NC} $name"
+        warn=$((warn+1))
+      else
+        echo -e "${RED}✗${NC} $name"
+        fail=$((fail+1))
+      fi
+    fi
+  }
+
+  _check_item "root 权限" '[ "$(id -u)" -eq 0 ]'
+  _check_item "包管理器" '_has apk || _has apt-get || _has dnf || _has yum || _has zypper'
+  _check_item "下载工具 curl/wget" '_has curl || _has wget' warn
+  _check_item "解压工具 tar" '_has tar' warn
+  _check_item "JSON 工具 jq" '_has jq' warn
+  _check_item "端口工具 ss/netstat" '_has ss || _has netstat' warn
+  _check_item "防火墙转发 iptables" '_has iptables' warn
+  _check_item "服务管理 systemd/OpenRC" '_has systemctl || _has rc-service' warn
+  _check_item "sing-box 核心" '[ -x "$BIN_PATH" ] || _has sing-box' warn
+  _check_item "配置目录可写" 'mkdir -p "$SINGBOX_DIR" && [ -w "$SINGBOX_DIR" ]'
+  _migrate_config_latest >/dev/null 2>&1 || true
+  _repair_missing_tls_certs >/dev/null 2>&1 || true
+
+  if [ -x "$BIN_PATH" ] && [ -f "$CONFIG_FILE" ]; then
+    _check_item "sing-box 配置检查" '"$BIN_PATH" check -c "$CONFIG_FILE"'
+  else
+    echo -e "${YELLOW}!${NC} sing-box 配置检查：核心或配置不存在，安装后再测"
+    warn=$((warn+1))
+  fi
+
+  echo
+  echo "结果: 通过 ${ok}，警告 ${warn}，失败 ${fail}"
+  if [ "$fail" -eq 0 ]; then
+    _ok "基础环境可用"
+    return 0
+  fi
+  _err "存在必须修复的问题，可先执行：$0 deps"
+  return 1
+}
 
 _port_forward_apply() {
   _need_root
@@ -215,6 +317,7 @@ _port_forward_apply() {
   [ -f "$PF_FILE" ] || touch "$PF_FILE"
   _ensure_cmd iptables iptables iptables-nft || { _err "缺少 iptables"; return 1; }
   sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
   while IFS='|' read -r lport rhost rport proto remark; do
     [ -n "$lport" ] || continue
     proto="${proto:-tcp}"
@@ -369,11 +472,11 @@ _init_dirs() {
   if [ ! -f "$CONFIG_FILE" ]; then
     cat > "$CONFIG_FILE" <<'JSON'
 {
-  "log": {"level": "warn", "timestamp": false},
+  "log": {"disabled": false, "level": "error", "timestamp": false},
   "dns": {
     "servers": [
-      {"tag": "cf", "address": "1.1.1.1"},
-      {"tag": "local", "address": "223.5.5.5"}
+      {"tag": "cf", "type": "udp", "server": "1.1.1.1"},
+      {"tag": "local", "type": "udp", "server": "223.5.5.5"}
     ],
     "strategy": "prefer_ipv4"
   },
@@ -383,7 +486,9 @@ _init_dirs() {
     {"type": "block", "tag": "block"}
   ],
   "route": {
-    "auto_detect_interface": true,
+    "auto_detect_interface": false,
+    "find_process": false,
+    "default_domain_resolver": "cf",
     "final": "direct",
     "rules": []
   },
@@ -428,13 +533,17 @@ ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=1048576
-MemoryMax=256M
-CPUQuota=90%
+MemoryMax=192M
+MemoryHigh=160M
+CPUQuota=85%
+TasksMax=256
 # 省内存/安全加固
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
+PrivateDevices=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target
@@ -502,6 +611,24 @@ _del_user_record() {
   jq --arg name "$name" '.users |= map(select(.name != $name))' "$USER_FILE" > "$tmp" && mv "$tmp" "$USER_FILE"
 }
 
+
+_ensure_tls_cert() {
+  local name="$1" cert="$SINGBOX_DIR/${name}.pem" key="$SINGBOX_DIR/${name}.key"
+  if [ -s "$cert" ] && [ -s "$key" ]; then
+    echo "$cert|$key"
+    return 0
+  fi
+  if _has openssl; then
+    openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+      -subj "/CN=sing-box-sheldon" \
+      -keyout "$key" -out "$cert" >/dev/null 2>&1 || return 1
+    chmod 600 "$key" 2>/dev/null || true
+    echo "$cert|$key"
+    return 0
+  fi
+  return 1
+}
+
 _add_inbound_json() {
   _jq
   local proto="$1" tag="$2" port="$3" uuid="$4" pass="$5" tmp="$CONFIG_FILE.tmp" inbound
@@ -519,7 +646,9 @@ _add_inbound_json() {
     shadowsocks|ss)
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" '{type:"shadowsocks",tag:$tag,listen:"::",listen_port:$port,method:"2022-blake3-aes-128-gcm",password:$pass}' ) ;;
     anytls)
-      inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" '{type:"anytls",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pass}]}' ) ;;
+      local ck cert key; ck="$(_ensure_tls_cert "${tag}-${port}")" || { _err "AnyTLS 需要 TLS 证书，且 openssl 不可用"; return 1; }
+      cert="${ck%%|*}"; key="${ck##*|}"
+      inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" --arg cert "$cert" --arg key "$key" '{type:"anytls",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pass}],tls:{enabled:true,certificate_path:$cert,key_path:$key}}' ) ;;
     socks)
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" '{type:"socks",tag:$tag,listen:"::",listen_port:$port,users:[{username:"user",password:$pass}]}' ) ;;
     *) _err "不支持协议: $proto"; return 1 ;;
@@ -602,7 +731,30 @@ _export_user() {
   esac
 }
 
+
+_optimize_config_light() {
+  _jq
+  _init_dirs
+  local tmp="$CONFIG_FILE.tmp"
+  jq '
+    .log = ((.log // {}) + {disabled:false, level:"error", timestamp:false}) |
+    .experimental.cache_file.enabled = false |
+    .route.auto_detect_interface = false |
+    .route.find_process = false |
+    .route.default_domain_resolver = (.route.default_domain_resolver // ((.dns.servers[0].tag // "cf"))) |
+    if (.dns.servers? | type) == "array" then
+      .dns.servers |= map(if (.address? and (.type? | not)) then .type="udp" | .server=.address | del(.address) else . end)
+    else . end |
+    .route.default_domain_resolver = (.route.default_domain_resolver // ((.dns.servers[0].tag // "cf"))) |
+    if (.dns.rules? | type) == "array" then
+      .dns.rules |= map(del(.outbound, .domain_resolver))
+    else . end
+  ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  _ok "已应用轻量配置: log=error、关闭 cache、关闭接口/进程自动探测"
+}
+
 _optimize_system() {
+  _optimize_config_light >/dev/null 2>&1 || true
   cat >/etc/sysctl.d/99-sing-box-sheldon.conf <<'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
@@ -613,6 +765,12 @@ net.ipv4.tcp_fin_timeout=15
 net.ipv4.tcp_tw_reuse=1
 net.core.somaxconn=4096
 net.ipv4.tcp_max_syn_backlog=4096
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_keepalive_time=600
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_keepalive_probes=5
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
 net.ipv4.ip_local_port_range=1024 65535
 EOF
   sysctl --system >/dev/null 2>&1 || true
@@ -621,9 +779,10 @@ EOF
     cat >/etc/systemd/system/sing-box.service.d/override.conf <<'EOF'
 [Service]
 LimitNOFILE=1048576
-OOMScoreAdjust=-500
+OOMScoreAdjust=-300
 MemoryAccounting=true
 CPUAccounting=true
+TasksMax=256
 EOF
     systemctl daemon-reload
   fi
@@ -636,6 +795,8 @@ _install_update() {
   _sync_latest_version
   _download_singbox || { _err "下载失败"; return; }
   _install_service
+  _migrate_config_latest >/dev/null 2>&1 || true
+  _repair_missing_tls_certs >/dev/null 2>&1 || true
   _optimize_system
   _check_config && _service restart >/dev/null 2>&1 || true
   _ok "安装/更新完成"
@@ -728,6 +889,7 @@ _cli() {
     install|update) _install_update ;;
     latest) _sync_latest_version; echo "$SINGBOX_VERSION" ;;
     optimize) _optimize_system ;;
+    light|lowmem) _optimize_config_light ;;
     deps|repair) _ensure_core_deps ;;
     relay) _relay_menu ;;
     port-forward|forward|pf) _port_forward_menu ;;
@@ -739,6 +901,7 @@ _cli() {
     stop) _service stop ;;
     status) _service status ;;
     check) _check_config ;;
+    self-check|doctor|test) _self_check ;;
     logs) _logs ;;
     menu|sp) _main_menu ;;
     add-user) shift; _add_user ;;

@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.12`
 >
-> 脚本版本：`v1.2.1`
+> 脚本版本：`v1.2.3`
 
 ## 功能特性
 
@@ -103,7 +103,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.1]
+        [sing-box Sheldon 管理系统 V1.2.3]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
@@ -130,13 +130,15 @@ sudo ./sing-box-sheldon.sh
 
 ```bash
 ./sing-box-sheldon.sh install      # 安装/更新 sing-box
-./sing-box-sheldon.sh optimize     # 应用性能优化
+./sing-box-sheldon.sh optimize     # 应用性能/省内存优化
+./sing-box-sheldon.sh lowmem       # 只应用轻量配置优化
 ./sing-box-sheldon.sh start        # 启动服务
 ./sing-box-sheldon.sh stop         # 停止服务
 ./sing-box-sheldon.sh restart      # 重启服务
 ./sing-box-sheldon.sh status       # 查看状态
 ./sing-box-sheldon.sh check        # 检查配置
 ./sing-box-sheldon.sh logs         # 查看日志
+./sing-box-sheldon.sh doctor       # 脚本自检/可用性检测
 ./sing-box-sheldon.sh pf           # 端口转发管理
 ./sing-box-sheldon.sh forward      # 端口转发管理
 sp                            # 直接召唤脚本菜单
@@ -164,6 +166,45 @@ sp
 /usr/local/bin/sing-box-sheldon
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
 ```
+
+## v1.2.3 省内存/性能优化
+
+进一步压低默认资源占用：
+
+- 日志从 `warn` 调整为 `error`，减少磁盘写入和日志处理
+- 关闭 `cache_file`
+- 关闭 `route.auto_detect_interface`
+- 关闭 `route.find_process`
+- systemd 限制：`MemoryMax=192M`、`MemoryHigh=160M`、`CPUQuota=85%`、`TasksMax=256`
+- 增加 TCP keepalive / Fast Open / BBR / 队列优化
+- 提供轻量配置命令：
+
+```bash
+./sing-box-sheldon.sh lowmem
+./sing-box-sheldon.sh light
+```
+
+## 自检/可用性检测
+
+`v1.2.2` 新增自检命令，用于快速判断当前服务器能不能正常安装/运行。
+
+```bash
+./sing-box-sheldon.sh doctor
+# 或
+./sing-box-sheldon.sh self-check
+./sing-box-sheldon.sh test
+```
+
+检测内容：
+
+- root 权限
+- 包管理器
+- curl / wget
+- tar / jq / ss / iptables
+- systemd / OpenRC
+- sing-box 核心
+- 配置目录可写
+- 已安装时自动执行 sing-box config check
 
 ## 端口转发管理
 
@@ -257,7 +298,7 @@ socks
 
 默认配置尽量减少长期资源占用：
 
-- `log.level = warn`，避免大量日志写入
+- `log.level = error`，进一步减少日志写入
 - `experimental.cache_file.enabled = false`
 - 不开启面板、不驻留额外 Web 服务
 - systemd 下限制 `MemoryMax=256M`
