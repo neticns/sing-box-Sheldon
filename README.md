@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.12`
 >
-> 脚本版本：`v1.3.0`
+> 脚本版本：`v1.4.0`
 
 ## 功能特性
 
@@ -41,6 +41,10 @@
   - 状态查看
   - 配置检查
   - 日志查看
+- 端口转发管理
+  - TCP / UDP / both 转发
+  - 新增 / 删除 / 清空 / 应用规则
+  - systemd 开机自动应用
 
 ## 自动补依赖
 
@@ -84,7 +88,7 @@
 ## 快速安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/sing-box-sheldon/main/sing-box-sheldon.sh -o sing-box-sheldon.sh
+curl -fsSL https://raw.githubusercontent.com/neticns/sing-box-Sheldon/main/sing-box-sheldon.sh -o sing-box-sheldon.sh
 chmod +x sing-box-sheldon.sh
 sudo ./sing-box-sheldon.sh
 ```
@@ -99,7 +103,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.3.0]
+        [sing-box Sheldon 管理系统 V1.4.0]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
@@ -113,7 +117,8 @@ sudo ./sing-box-sheldon.sh
     8. 检查配置
     9. 重启 sing-box
     10. 查看日志
-    11. 卸载 sing-box
+    11. 端口转发管理
+    12. 卸载 sing-box
     0. 退出系统
 ------------------------------------------------------------
 请选择操作指令:
@@ -132,6 +137,8 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh status       # 查看状态
 ./sing-box-sheldon.sh check        # 检查配置
 ./sing-box-sheldon.sh logs         # 查看日志
+./sing-box-sheldon.sh pf           # 端口转发管理
+./sing-box-sheldon.sh forward      # 端口转发管理
 sp                            # 直接召唤脚本菜单
 ./sing-box-sheldon.sh sp           # 同样打开脚本菜单
 ```
@@ -156,6 +163,40 @@ sp
 ```text
 /usr/local/bin/sing-box-sheldon
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
+```
+
+## 端口转发管理
+
+`v1.4.0` 新增端口转发管理，适合中转机/NAT 机器做本地端口到远端目标的转发。
+
+支持：
+
+- 本地端口 → 目标 IP/域名:目标端口
+- 协议：`tcp` / `udp` / `both`
+- 新增、删除、清空、应用规则
+- 自动开启 IPv4 转发：`net.ipv4.ip_forward=1`
+- 自动尝试放行防火墙端口
+- systemd 开机自动应用规则
+
+规则文件：
+
+```text
+/usr/local/etc/sing-box/port_forward.rules
+```
+
+进入方式：
+
+```bash
+sp
+# 选择 11. 端口转发管理
+```
+
+也可以直接：
+
+```bash
+./sing-box-sheldon.sh pf
+./sing-box-sheldon.sh forward
+./sing-box-sheldon.sh port-forward
 ```
 
 ## 配置文件路径

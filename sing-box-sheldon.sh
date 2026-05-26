@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.3.0
+# Version: 1.4.0
 
 set -o pipefail
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.4.0"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -14,6 +14,7 @@ SERVICE_NAME="sing-box"
 BIN_PATH="/usr/local/bin/sing-box"
 SCRIPT_PATH="/usr/local/bin/sing-box-sheldon"
 SP_PATH="/usr/local/bin/sp"
+PF_FILE="$SINGBOX_DIR/port_forward.rules"
 
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033[36m'; WHITE='\033[37m'; NC='\033[0m'
 BOLD='\033[1m'
@@ -202,6 +203,138 @@ _system_tools_menu() {
       4) uname -a; echo; free -h 2>/dev/null || true; df -h 2>/dev/null || true; _pause ;;
       5) _generate_uuid; _pause ;;
       6) _generate_reality_keypair; _pause ;;
+      0) break ;;
+    esac
+  done
+}
+
+
+_port_forward_apply() {
+  _need_root
+  mkdir -p "$SINGBOX_DIR"
+  [ -f "$PF_FILE" ] || touch "$PF_FILE"
+  _ensure_cmd iptables iptables iptables-nft || { _err "缺少 iptables"; return 1; }
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  while IFS='|' read -r lport rhost rport proto remark; do
+    [ -n "$lport" ] || continue
+    proto="${proto:-tcp}"
+    iptables -t nat -C PREROUTING -p "$proto" --dport "$lport" -j DNAT --to-destination "${rhost}:${rport}" 2>/dev/null || \
+      iptables -t nat -A PREROUTING -p "$proto" --dport "$lport" -j DNAT --to-destination "${rhost}:${rport}"
+    iptables -t nat -C POSTROUTING -p "$proto" -d "$rhost" --dport "$rport" -j MASQUERADE 2>/dev/null || \
+      iptables -t nat -A POSTROUTING -p "$proto" -d "$rhost" --dport "$rport" -j MASQUERADE
+    _open_firewall_port "$lport" "$proto"
+  done < "$PF_FILE"
+  _ok "端口转发规则已应用"
+}
+
+_port_forward_add() {
+  _need_root
+  mkdir -p "$SINGBOX_DIR"
+  read -r -p "本地监听端口: " lport
+  [[ "$lport" =~ ^[0-9]+$ ]] || { _err "端口错误"; return; }
+  read -r -p "目标 IP/域名: " rhost
+  [ -n "$rhost" ] || { _err "目标不能为空"; return; }
+  read -r -p "目标端口 [$lport]: " rport; rport="${rport:-$lport}"
+  [[ "$rport" =~ ^[0-9]+$ ]] || { _err "目标端口错误"; return; }
+  read -r -p "协议 tcp/udp/both [tcp]: " proto; proto="${proto:-tcp}"
+  read -r -p "备注: " remark
+  case "$proto" in
+    tcp|udp)
+      echo "${lport}|${rhost}|${rport}|${proto}|${remark}" >> "$PF_FILE" ;;
+    both)
+      echo "${lport}|${rhost}|${rport}|tcp|${remark}" >> "$PF_FILE"
+      echo "${lport}|${rhost}|${rport}|udp|${remark}" >> "$PF_FILE" ;;
+    *) _err "协议只能是 tcp/udp/both"; return ;;
+  esac
+  _port_forward_apply
+}
+
+_port_forward_list() {
+  mkdir -p "$SINGBOX_DIR"
+  [ -f "$PF_FILE" ] || touch "$PF_FILE"
+  echo -e "${BLUE}--------------------------------------------------------------------------------${NC}"
+  printf "${GREEN}%-5s %-8s %-24s %-8s %-8s %-20s${NC}\n" "序号" "本地端口" "目标" "目标端口" "协议" "备注"
+  echo -e "${BLUE}--------------------------------------------------------------------------------${NC}"
+  local i=1
+  while IFS='|' read -r lport rhost rport proto remark; do
+    [ -n "$lport" ] || continue
+    printf "%-5s %-8s %-24s %-8s %-8s %-20s\n" "$i" "$lport" "$rhost" "$rport" "$proto" "$remark"
+    i=$((i+1))
+  done < "$PF_FILE"
+}
+
+_port_forward_delete() {
+  _need_root
+  _port_forward_list
+  read -r -p "要删除的序号: " idx
+  [[ "$idx" =~ ^[0-9]+$ ]] || return
+  local line lport rhost rport proto remark tmp
+  line=$(sed -n "${idx}p" "$PF_FILE")
+  [ -n "$line" ] || { _err "序号不存在"; return; }
+  IFS='|' read -r lport rhost rport proto remark <<EOF
+$line
+EOF
+  iptables -t nat -D PREROUTING -p "$proto" --dport "$lport" -j DNAT --to-destination "${rhost}:${rport}" 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -p "$proto" -d "$rhost" --dport "$rport" -j MASQUERADE 2>/dev/null || true
+  tmp="${PF_FILE}.tmp"
+  awk -v n="$idx" 'NR!=n' "$PF_FILE" > "$tmp" && mv "$tmp" "$PF_FILE"
+  _ok "已删除端口转发规则"
+}
+
+_port_forward_clear() {
+  _need_root
+  [ -f "$PF_FILE" ] || { _ok "没有端口转发规则"; return; }
+  while IFS='|' read -r lport rhost rport proto remark; do
+    [ -n "$lport" ] || continue
+    iptables -t nat -D PREROUTING -p "$proto" --dport "$lport" -j DNAT --to-destination "${rhost}:${rport}" 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -p "$proto" -d "$rhost" --dport "$rport" -j MASQUERADE 2>/dev/null || true
+  done < "$PF_FILE"
+  : > "$PF_FILE"
+  _ok "已清空端口转发规则"
+}
+
+_port_forward_persist() {
+  _need_root
+  _ensure_cmd iptables iptables iptables-nft || return 1
+  cat >/etc/systemd/system/sing-box-sheldon-port-forward.service <<EOF
+[Unit]
+Description=sing-box Sheldon port forward rules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_PATH port-forward-apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  if _has systemctl; then systemctl daemon-reload; systemctl enable sing-box-sheldon-port-forward >/dev/null 2>&1 || true; fi
+  _ok "已设置 systemd 开机自动应用端口转发"
+}
+
+_port_forward_menu() {
+  while true; do
+    clear
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${BOLD}${WHITE}                    端口转发管理${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    _port_forward_list
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "    ${BLUE}1.${NC} ${GREEN}新增端口转发${NC}"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}删除端口转发${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}应用转发规则${NC}"
+    echo -e "    ${BLUE}4.${NC} ${GREEN}清空转发规则${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}设置开机自动应用${NC}"
+    echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
+    read -r -p "请选择操作: " c
+    case "$c" in
+      1) _port_forward_add; _pause ;;
+      2) _port_forward_delete; _pause ;;
+      3) _port_forward_apply; _pause ;;
+      4) _port_forward_clear; _pause ;;
+      5) _port_forward_persist; _pause ;;
       0) break ;;
     esac
   done
@@ -567,7 +700,8 @@ _main_menu() {
     echo -e "    ${BLUE}8.${NC} ${GREEN}检查配置${NC}"
     echo -e "    ${BLUE}9.${NC} ${GREEN}重启 sing-box${NC}"
     echo -e "    ${BLUE}10.${NC} ${GREEN}查看日志${NC}"
-    echo -e "    ${BLUE}11.${NC} ${GREEN}卸载 sing-box${NC}"
+    echo -e "    ${BLUE}11.${NC} ${GREEN}端口转发管理${NC}"
+    echo -e "    ${BLUE}12.${NC} ${GREEN}卸载 sing-box${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}退出系统${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     read -r -p "请选择操作指令: " choice
@@ -582,7 +716,8 @@ _main_menu() {
       8) _check_config; _pause ;;
       9) _service restart; _pause ;;
       10) _logs; _pause ;;
-      11) _uninstall_all; _pause ;;
+      11) _port_forward_menu ;;
+      12) _uninstall_all; _pause ;;
       0) exit 0 ;;
     esac
   done
@@ -595,6 +730,8 @@ _cli() {
     optimize) _optimize_system ;;
     deps|repair) _ensure_core_deps ;;
     relay) _relay_menu ;;
+    port-forward|forward|pf) _port_forward_menu ;;
+    port-forward-apply) _port_forward_apply ;;
     warp) _warp_menu ;;
     uninstall) _uninstall_all ;;
     restart) _service restart ;;
