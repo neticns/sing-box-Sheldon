@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.0.0
+# Version: 1.2.0
 
 set -o pipefail
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -28,12 +28,99 @@ _rand_uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || sing-box generate
 _rand_pass() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24; echo; }
 
 _pkg_install() {
-  if _has apk; then apk add --no-cache "$@"; return; fi
-  if _has apt-get; then apt-get update -qq >/dev/null 2>&1 || true; DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"; return; fi
-  if _has dnf; then dnf install -y "$@"; return; fi
-  if _has yum; then yum install -y "$@"; return; fi
-  _err "未知包管理器，请手动安装: $*"; return 1
+  _pkg_update_once
+  local p ok=0
+  for p in "$@"; do
+    _pkg_install_one "$p" && ok=1 || true
+  done
+  [ "$ok" = "1" ] || { _err "未知包管理器或依赖安装失败: $*"; return 1; }
 }
+
+_realpath_self() {
+  if _has readlink; then readlink -f "$0" 2>/dev/null && return; fi
+  echo "$0"
+}
+
+_detect_os() {
+  if [ -f /etc/os-release ]; then . /etc/os-release; echo "${ID:-unknown}"; else echo unknown; fi
+}
+
+_pkg_update_once() {
+  [ "${PKG_UPDATED:-0}" = "1" ] && return 0
+  PKG_UPDATED=1
+  if _has apk; then apk update || true; return 0; fi
+  if _has apt-get; then apt-get update -y || apt-get update || true; return 0; fi
+  if _has dnf; then dnf makecache -y || true; return 0; fi
+  if _has yum; then yum makecache -y || true; return 0; fi
+  if _has zypper; then zypper --non-interactive refresh || true; return 0; fi
+  return 0
+}
+
+_pkg_install_one() {
+  local pkg="$1"
+  if _has apk; then apk add --no-cache "$pkg" && return 0; apk add "$pkg" && return 0; fi
+  if _has apt-get; then DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" && return 0; fi
+  if _has dnf; then dnf install -y "$pkg" && return 0; fi
+  if _has yum; then yum install -y "$pkg" && return 0; fi
+  if _has zypper; then zypper --non-interactive install -y "$pkg" && return 0; fi
+  return 1
+}
+
+_ensure_cmd() {
+  local cmd="$1"; shift
+  _has "$cmd" && return 0
+  _pkg_update_once
+  local p
+  for p in "$@"; do
+    [ -n "$p" ] || continue
+    _warn "缺少 $cmd，尝试安装依赖包: $p"
+    _pkg_install_one "$p" && _has "$cmd" && return 0
+  done
+  _has "$cmd" && return 0
+  _err "无法自动安装依赖: $cmd"
+  return 1
+}
+
+_ensure_core_deps() {
+  _pkg_update_once
+  _ensure_cmd curl curl ca-certificates || _ensure_cmd wget wget ca-certificates || return 1
+  _ensure_cmd tar tar || return 1
+  _ensure_cmd gzip gzip || true
+  _ensure_cmd jq jq || true
+  _ensure_cmd ss iproute2 iproute iproute2-ss || true
+  _ensure_cmd uuidgen uuid-runtime util-linux || true
+  _ensure_cmd base64 coreutils || true
+  if ! _has curl && _has wget; then _warn "curl 不可用，将使用 wget 下载"; fi
+  return 0
+}
+
+_fetch() {
+  local url="$1" out="$2"
+  if _has curl; then
+    curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 240 "$url" -o "$out" && return 0
+  fi
+  if _has wget; then
+    wget -O "$out" --tries=3 --timeout=30 "$url" && return 0
+  fi
+  return 1
+}
+
+_install_script_shortcut() {
+  local self
+  self="$(_realpath_self)"
+  if [ -f "$self" ]; then
+    install -m 755 "$self" "$SCRIPT_PATH" 2>/dev/null || cp "$self" "$SCRIPT_PATH"
+  elif [ -f "$0" ]; then
+    cp "$0" "$SCRIPT_PATH" 2>/dev/null || true
+  fi
+  if [ -f "$SCRIPT_PATH" ]; then
+    chmod +x "$SCRIPT_PATH" 2>/dev/null || true
+    ln -sf "$SCRIPT_PATH" "$SP_PATH" 2>/dev/null || true
+  else
+    _warn "当前是管道执行，无法复制脚本本体；如需 sp 快捷命令，请先下载脚本文件再运行安装"
+  fi
+}
+
 
 _arch() {
   case "$(uname -m)" in
@@ -81,14 +168,12 @@ _download_singbox() {
   arch="$(_arch)"
   tmp="/tmp/sing-box-${SINGBOX_VERSION}-${arch}.tar.gz"
   url="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${arch}.tar.gz"
-  _has curl || _pkg_install curl
-  _has tar || _pkg_install tar
+  _ensure_core_deps || return 1
   _warn "下载 sing-box v${SINGBOX_VERSION} (${arch})..."
-  curl -fL --connect-timeout 15 --max-time 180 "$url" -o "$tmp" || return 1
+  _fetch "$url" "$tmp" || return 1
   tar -xzf "$tmp" -C /tmp || return 1
   install -m 755 "/tmp/sing-box-${SINGBOX_VERSION}-linux-${arch}/sing-box" "$BIN_PATH"
-  install -m 755 "$0" "$SCRIPT_PATH"
-  ln -sf "$SCRIPT_PATH" "$SP_PATH"
+  _install_script_shortcut
   rm -rf "$tmp" "/tmp/sing-box-${SINGBOX_VERSION}-linux-${arch}"
 }
 
@@ -234,7 +319,7 @@ _add_user() {
   read -r -p "协议 [vless]: " proto; proto="${proto:-vless}"
   read -r -p "监听端口: " port
   [[ "$port" =~ ^[0-9]+$ ]] || { _err "端口错误"; return; }
-  if ss -lntup 2>/dev/null | grep -q ":$port "; then _err "端口已占用"; return; fi
+  if _has ss && ss -lntup 2>/dev/null | grep -q ":$port "; then _err "端口已占用"; return; fi
   read -r -p "套餐 [不限]: " plan; plan="${plan:-不限}"
   read -r -p "重置日 [不重置]: " reset; reset="${reset:-不重置}"
   read -r -p "到期时间 [永久]: " expire; expire="${expire:-永久}"
@@ -313,7 +398,7 @@ EOF
 
 _install_update() {
   _need_root
-  _has jq || _pkg_install jq
+  _ensure_core_deps || { _err "依赖安装失败"; return; }
   _download_singbox || { _err "下载失败"; return; }
   _install_service
   _optimize_system

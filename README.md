@@ -3,6 +3,8 @@
 `sing-box Sheldon` 是轻量版 `sing-box` 管理脚本，适合快速部署、管理节点用户、导出节点链接，并针对低内存 VPS 做了默认优化。
 
 > 当前核心版本：`sing-box v1.13.12`
+>
+> 脚本版本：`v1.2.0`
 
 ## 功能特性
 
@@ -40,6 +42,30 @@
   - 配置检查
   - 日志查看
 
+## 自动补依赖
+
+`v1.2.0` 开始，安装时会自动检测并补齐常见依赖，尽量做到“缺什么补什么，直到安装成功”。
+
+自动处理的依赖包括：
+
+- `curl` / `wget`：下载 sing-box 核心
+- `ca-certificates`：修复 HTTPS 证书问题
+- `tar` / `gzip`：解压 release 包
+- `jq`：读写 JSON 配置
+- `iproute2` / `ss`：端口占用检测
+- `uuidgen` / `util-linux`：UUID 生成兜底
+- `coreutils` / `base64`：节点链接编码
+
+支持的包管理器：
+
+- `apk`：Alpine
+- `apt-get`：Debian / Ubuntu
+- `dnf`：Fedora / Rocky / AlmaLinux
+- `yum`：CentOS
+- `zypper`：openSUSE
+
+如果 `curl` 不存在但 `wget` 可用，脚本会自动使用 `wget` 下载。
+
 ## 系统支持
 
 已按以下环境编写：
@@ -73,7 +99,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.1.0]
+        [sing-box Sheldon 管理系统 V1.2.0]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
