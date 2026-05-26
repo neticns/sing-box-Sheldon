@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.12`
 >
-> 脚本版本：`v1.2.6`
+> 脚本版本：`v1.2.7`
 
 ## 功能特性
 
@@ -15,6 +15,8 @@
   - 查看用户套餐、重置日、到期时间
   - 导出节点链接
 - 支持常用与新型防封协议
+  - Sheldon 协议：脚本自创高安全预设，基于 AnyTLS + Reality + 公共站点伪装 + NTP
+  - Sheldon VLESS：基于 VLESS Reality + Vision 的兼容预设
   - VLESS
   - VLESS Reality
   - Reality 公共站点伪装
@@ -108,7 +110,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.6]
+        [sing-box Sheldon 管理系统 V1.2.7]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
@@ -172,6 +174,36 @@ sp
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
 ```
 
+## v1.2.7 Sheldon 协议预设
+
+新增 `Sheldon` 自创协议预设。它不是魔改 sing-box 核心的新私有协议，而是为了兼容性和稳定性，把当前更适合自建节点的安全伪装参数组合成一套默认模板。
+
+协议别名：
+
+```text
+sheldon           # 推荐，AnyTLS + Reality + 公共站点伪装
+sheldon-reality   # sheldon 的同义别名
+sheldon-vless     # VLESS + Reality + Vision 兼容预设
+```
+
+Sheldon 默认策略：
+
+- AnyTLS + Reality，无需购买域名，无需自签名证书
+- 自动随机公共站点握手伪装
+- 默认 `fp=chrome`
+- 默认 `h2,http/1.1` ALPN
+- 16 位随机 short_id
+- 自动写入 NTP 校时配置，减少 `Handshake failed` / `Time offset too large`
+- 保持 sing-box 原生配置，不魔改核心，方便客户端兼容
+
+新增用户时协议直接输入：
+
+```text
+sheldon
+```
+
+推荐优先级：`sheldon` > `sheldon-vless` > `anytls-reality` > `vless-reality`。
+
 ## v1.2.6 防封协议、伪装与 NTP 校时
 
 新增/优化：
@@ -185,6 +217,8 @@ sp
 新增用户时协议可直接输入：
 
 ```text
+sheldon
+sheldon-vless
 anytls-reality
 vless-reality
 ```
