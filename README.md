@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.12`
 >
-> 脚本版本：`v1.2.3`
+> 脚本版本：`v1.2.4`
 
 ## 功能特性
 
@@ -103,7 +103,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.3]
+        [sing-box Sheldon 管理系统 V1.2.4]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
@@ -118,7 +118,8 @@ sudo ./sing-box-sheldon.sh
     9. 重启 sing-box
     10. 查看日志
     11. 端口转发管理
-    12. 卸载 sing-box
+    12. 命令菜单
+    13. 卸载 sing-box
     0. 退出系统
 ------------------------------------------------------------
 请选择操作指令:
@@ -132,6 +133,8 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh install      # 安装/更新 sing-box
 ./sing-box-sheldon.sh optimize     # 应用性能/省内存优化
 ./sing-box-sheldon.sh lowmem       # 只应用轻量配置优化
+./sing-box-sheldon.sh cmd          # 打开命令菜单
+./sing-box-sheldon.sh help         # 打开命令菜单
 ./sing-box-sheldon.sh start        # 启动服务
 ./sing-box-sheldon.sh stop         # 停止服务
 ./sing-box-sheldon.sh restart      # 重启服务
@@ -139,6 +142,7 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh check        # 检查配置
 ./sing-box-sheldon.sh logs         # 查看日志
 ./sing-box-sheldon.sh doctor       # 脚本自检/可用性检测
+./sing-box-sheldon.sh relay        # 中转管理
 ./sing-box-sheldon.sh pf           # 端口转发管理
 ./sing-box-sheldon.sh forward      # 端口转发管理
 sp                            # 直接召唤脚本菜单
@@ -166,6 +170,27 @@ sp
 /usr/local/bin/sing-box-sheldon
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
 ```
+
+## 命令菜单
+
+`v1.2.4` 新增命令菜单，方便查看和执行常用快捷命令。
+
+进入方式：
+
+```bash
+sp
+# 选择 12. 命令菜单
+```
+
+也可以直接执行：
+
+```bash
+./sing-box-sheldon.sh cmd
+./sing-box-sheldon.sh commands
+./sing-box-sheldon.sh help
+```
+
+命令菜单包含：安装/更新、自检、低内存优化、系统优化、中转管理、端口转发、检查配置、查看日志、重启服务、一键安装命令展示。
 
 ## v1.2.3 省内存/性能优化
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.3
+# Version: 1.2.4
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.3"
+SCRIPT_VERSION="1.2.4"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -842,6 +842,54 @@ _proto_menu() {
   echo "默认轻量策略: log=warn、关闭 cache_file、少写磁盘、不启用无用 sniff/统计服务。"
 }
 
+
+_command_menu() {
+  while true; do
+    clear
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${BOLD}${WHITE}                    命令菜单 / 快捷命令${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${GREEN}常用命令:${NC}"
+    printf "  %-32s %s\n" "sp" "打开主菜单"
+    printf "  %-32s %s\n" "sing-box-sheldon install" "安装/更新 sing-box"
+    printf "  %-32s %s\n" "sing-box-sheldon doctor" "自检服务器是否可用"
+    printf "  %-32s %s\n" "sing-box-sheldon lowmem" "应用省内存轻量配置"
+    printf "  %-32s %s\n" "sing-box-sheldon optimize" "应用系统性能优化"
+    printf "  %-32s %s\n" "sing-box-sheldon relay" "中转管理"
+    printf "  %-32s %s\n" "sing-box-sheldon pf" "端口转发管理"
+    printf "  %-32s %s\n" "sing-box-sheldon logs" "查看日志"
+    printf "  %-32s %s\n" "sing-box-sheldon check" "检查 sing-box 配置"
+    printf "  %-32s %s\n" "sing-box-sheldon restart" "重启 sing-box"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "    ${BLUE}1.${NC} ${GREEN}安装/更新 sing-box${NC}"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}自检服务器是否可用${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}应用省内存轻量配置${NC}"
+    echo -e "    ${BLUE}4.${NC} ${GREEN}应用系统性能优化${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}中转管理${NC}"
+    echo -e "    ${BLUE}6.${NC} ${GREEN}端口转发管理${NC}"
+    echo -e "    ${BLUE}7.${NC} ${GREEN}检查配置${NC}"
+    echo -e "    ${BLUE}8.${NC} ${GREEN}查看日志${NC}"
+    echo -e "    ${BLUE}9.${NC} ${GREEN}重启 sing-box${NC}"
+    echo -e "    ${BLUE}10.${NC} ${GREEN}复制/显示一键安装命令${NC}"
+    echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    read -r -p "请选择操作: " c
+    case "$c" in
+      1) _install_update; _pause ;;
+      2) _self_check; _pause ;;
+      3) _optimize_config_light; _pause ;;
+      4) _optimize_system; _pause ;;
+      5) _relay_menu; _pause ;;
+      6) _port_forward_menu ;;
+      7) _check_config; _pause ;;
+      8) _logs; _pause ;;
+      9) _service restart; _pause ;;
+      10) echo "curl -fsSL https://raw.githubusercontent.com/neticns/sing-box-Sheldon/main/sing-box-sheldon.sh -o sing-box-sheldon.sh && chmod +x sing-box-sheldon.sh && sudo ./sing-box-sheldon.sh"; _pause ;;
+      0) break ;;
+    esac
+  done
+}
+
 _main_menu() {
   _init_dirs
   while true; do
@@ -862,7 +910,8 @@ _main_menu() {
     echo -e "    ${BLUE}9.${NC} ${GREEN}重启 sing-box${NC}"
     echo -e "    ${BLUE}10.${NC} ${GREEN}查看日志${NC}"
     echo -e "    ${BLUE}11.${NC} ${GREEN}端口转发管理${NC}"
-    echo -e "    ${BLUE}12.${NC} ${GREEN}卸载 sing-box${NC}"
+    echo -e "    ${BLUE}12.${NC} ${GREEN}命令菜单${NC}"
+    echo -e "    ${BLUE}13.${NC} ${GREEN}卸载 sing-box${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}退出系统${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     read -r -p "请选择操作指令: " choice
@@ -878,7 +927,8 @@ _main_menu() {
       9) _service restart; _pause ;;
       10) _logs; _pause ;;
       11) _port_forward_menu ;;
-      12) _uninstall_all; _pause ;;
+      12) _command_menu ;;
+      13) _uninstall_all; _pause ;;
       0) exit 0 ;;
     esac
   done
@@ -904,6 +954,7 @@ _cli() {
     self-check|doctor|test) _self_check ;;
     logs) _logs ;;
     menu|sp) _main_menu ;;
+    cmd|commands|help|-h|--help) _command_menu ;;
     add-user) shift; _add_user ;;
     export-user) shift; _export_user ;;
     *) _main_menu ;;
