@@ -1,6 +1,6 @@
-# Sing-box Elite Lite
+# sing-box Sheldon
 
-轻量版 `sing-box` 管理脚本，适合快速部署、管理节点用户、导出节点链接，并针对低内存 VPS 做了默认优化。
+`sing-box Sheldon` 是轻量版 `sing-box` 管理脚本，适合快速部署、管理节点用户、导出节点链接，并针对低内存 VPS 做了默认优化。
 
 > 当前核心版本：`sing-box v1.13.12`
 
@@ -58,9 +58,9 @@
 ## 快速安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/singbox-elite-lite.sh -o singbox-elite-lite.sh
-chmod +x singbox-elite-lite.sh
-sudo ./singbox-elite-lite.sh
+curl -fsSL https://raw.githubusercontent.com/OWNER/sing-box-sheldon/main/sing-box-sheldon.sh -o sing-box-sheldon.sh
+chmod +x sing-box-sheldon.sh
+sudo ./sing-box-sheldon.sh
 ```
 
 进入菜单后选择：
@@ -73,7 +73,7 @@ sudo ./singbox-elite-lite.sh
 
 ```text
 ------------------------------------------------------------
-        [Sing-box Elite Lite 管理系统 V1.0.0]
+        [sing-box Sheldon 管理系统 V1.1.0]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
@@ -84,6 +84,7 @@ sudo ./singbox-elite-lite.sh
     5. 检查配置
     6. 重启 sing-box
     7. 查看日志
+    sp. 快捷发频道公告
     0. 退出系统
 ------------------------------------------------------------
 请选择操作指令:
@@ -94,15 +95,45 @@ sudo ./singbox-elite-lite.sh
 除了交互菜单，也可以直接执行命令：
 
 ```bash
-./singbox-elite-lite.sh install      # 安装/更新 sing-box
-./singbox-elite-lite.sh optimize     # 应用性能优化
-./singbox-elite-lite.sh start        # 启动服务
-./singbox-elite-lite.sh stop         # 停止服务
-./singbox-elite-lite.sh restart      # 重启服务
-./singbox-elite-lite.sh status       # 查看状态
-./singbox-elite-lite.sh check        # 检查配置
-./singbox-elite-lite.sh logs         # 查看日志
+./sing-box-sheldon.sh install      # 安装/更新 sing-box
+./sing-box-sheldon.sh optimize     # 应用性能优化
+./sing-box-sheldon.sh start        # 启动服务
+./sing-box-sheldon.sh stop         # 停止服务
+./sing-box-sheldon.sh restart      # 重启服务
+./sing-box-sheldon.sh status       # 查看状态
+./sing-box-sheldon.sh check        # 检查配置
+./sing-box-sheldon.sh logs         # 查看日志
+./sing-box-sheldon.sh sp "公告内容" # 快捷发送 Telegram 频道公告
 ```
+
+## 快捷公告 sp
+
+`sp` 是 Telegram 频道/群组公告快捷键。
+
+交互菜单里直接输入：
+
+```text
+sp
+```
+
+命令行直接发送：
+
+```bash
+./sing-box-sheldon.sh sp "📢 公告内容"
+```
+
+第一次使用会要求填写：
+
+- Bot Token
+- 频道/群组 ID 或 `@username`，默认可填 `@kucunn`
+
+配置保存到：
+
+```text
+/usr/local/etc/sing-box/telegram.conf
+```
+
+以后再执行 `sp` 会自动读取配置发送。
 
 ## 配置文件路径
 
@@ -173,13 +204,13 @@ socks
 执行：
 
 ```bash
-./singbox-elite-lite.sh optimize
+./sing-box-sheldon.sh optimize
 ```
 
 会写入：
 
 ```text
-/etc/sysctl.d/99-singbox-elite-lite.conf
+/etc/sysctl.d/99-sing-box-sheldon.conf
 ```
 
 包含：
