@@ -870,7 +870,6 @@ _command_menu() {
     echo -e "    ${BLUE}7.${NC} ${GREEN}检查配置${NC}"
     echo -e "    ${BLUE}8.${NC} ${GREEN}查看日志${NC}"
     echo -e "    ${BLUE}9.${NC} ${GREEN}重启 sing-box${NC}"
-    echo -e "    ${BLUE}10.${NC} ${GREEN}复制/显示一键安装命令${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     read -r -p "请选择操作: " c
@@ -884,7 +883,6 @@ _command_menu() {
       7) _check_config; _pause ;;
       8) _logs; _pause ;;
       9) _service restart; _pause ;;
-      10) echo "curl -fsSL https://raw.githubusercontent.com/neticns/sing-box-Sheldon/main/sing-box-sheldon.sh -o sing-box-sheldon.sh && chmod +x sing-box-sheldon.sh && sudo ./sing-box-sheldon.sh"; _pause ;;
       0) break ;;
     esac
   done
