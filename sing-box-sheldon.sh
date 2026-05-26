@@ -12,6 +12,8 @@ CONFIG_FILE="$SINGBOX_DIR/config.json"
 USER_FILE="$SINGBOX_DIR/users.json"
 SERVICE_NAME="sing-box"
 BIN_PATH="/usr/local/bin/sing-box"
+SCRIPT_PATH="/usr/local/bin/sing-box-sheldon"
+SP_PATH="/usr/local/bin/sp"
 
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033[36m'; WHITE='\033[37m'; NC='\033[0m'
 BOLD='\033[1m'
@@ -85,6 +87,8 @@ _download_singbox() {
   curl -fL --connect-timeout 15 --max-time 180 "$url" -o "$tmp" || return 1
   tar -xzf "$tmp" -C /tmp || return 1
   install -m 755 "/tmp/sing-box-${SINGBOX_VERSION}-linux-${arch}/sing-box" "$BIN_PATH"
+  install -m 755 "$0" "$SCRIPT_PATH"
+  ln -sf "$SCRIPT_PATH" "$SP_PATH"
   rm -rf "$tmp" "/tmp/sing-box-${SINGBOX_VERSION}-linux-${arch}"
 }
 

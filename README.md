@@ -102,21 +102,30 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh status       # 查看状态
 ./sing-box-sheldon.sh check        # 检查配置
 ./sing-box-sheldon.sh logs         # 查看日志
-./sing-box-sheldon.sh sp           # 快捷打开脚本菜单
+sp                            # 直接召唤脚本菜单
+./sing-box-sheldon.sh sp           # 同样打开脚本菜单
 ```
 
 ## 快捷菜单 sp
 
-`sp` 是脚本菜单快捷命令，等同于直接打开 `sing-box Sheldon` 管理菜单。
+`sp` 是全局快捷命令。安装后，只需要在终端输入 `sp`，就能直接召唤 `sing-box Sheldon` 管理菜单。
 
 ```bash
-./sing-box-sheldon.sh sp
+sp
 ```
 
 也可以使用：
 
 ```bash
+./sing-box-sheldon.sh sp
 ./sing-box-sheldon.sh menu
+```
+
+安装/更新时脚本会自动创建：
+
+```text
+/usr/local/bin/sing-box-sheldon
+/usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
 ```
 
 ## 配置文件路径
