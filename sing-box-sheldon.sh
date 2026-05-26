@@ -844,27 +844,50 @@ _proto_menu() {
 
 
 _command_menu() {
-  clear
-  echo -e "${BLUE}------------------------------------------------------------${NC}"
-  echo -e "${BOLD}${WHITE}                    命令菜单 / 快捷命令${NC}"
-  echo -e "${BLUE}------------------------------------------------------------${NC}"
-  echo -e "${GREEN}只展示快捷命令，不重复做功能菜单。${NC}"
-  echo
-  printf "  %-34s %s\n" "sp" "打开主菜单"
-  printf "  %-34s %s\n" "sing-box-sheldon install" "安装/更新 sing-box"
-  printf "  %-34s %s\n" "sing-box-sheldon doctor" "自检服务器是否可用"
-  printf "  %-34s %s\n" "sing-box-sheldon lowmem" "应用省内存轻量配置"
-  printf "  %-34s %s\n" "sing-box-sheldon optimize" "应用系统性能优化"
-  printf "  %-34s %s\n" "sing-box-sheldon relay" "中转管理"
-  printf "  %-34s %s\n" "sing-box-sheldon pf" "端口转发管理"
-  printf "  %-34s %s\n" "sing-box-sheldon check" "检查 sing-box 配置"
-  printf "  %-34s %s\n" "sing-box-sheldon logs" "查看日志"
-  printf "  %-34s %s\n" "sing-box-sheldon restart" "重启 sing-box"
-  printf "  %-34s %s\n" "sing-box-sheldon status" "查看服务状态"
-  printf "  %-34s %s\n" "sing-box-sheldon add-user" "新增用户"
-  printf "  %-34s %s\n" "sing-box-sheldon export-user" "导出用户节点"
-  echo -e "${BLUE}------------------------------------------------------------${NC}"
-  _pause
+  while true; do
+    clear
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${BOLD}${WHITE}                    命令菜单${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${GREEN}这里支持数字选择；已去掉和主菜单重复的中转/端口转发入口。${NC}"
+    echo
+    echo -e "    ${BLUE}1.${NC} ${GREEN}安装/更新 sing-box${NC}"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}自检服务器是否可用${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}应用省内存轻量配置${NC}"
+    echo -e "    ${BLUE}4.${NC} ${GREEN}应用系统性能优化${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}检查 sing-box 配置${NC}"
+    echo -e "    ${BLUE}6.${NC} ${GREEN}查看日志${NC}"
+    echo -e "    ${BLUE}7.${NC} ${GREEN}重启 sing-box${NC}"
+    echo -e "    ${BLUE}8.${NC} ${GREEN}查看服务状态${NC}"
+    echo -e "    ${BLUE}9.${NC} ${GREEN}快捷命令说明${NC}"
+    echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    read -r -p "请选择操作: " c
+    case "$c" in
+      1) _install_update; _pause ;;
+      2) _self_check; _pause ;;
+      3) _optimize_config_light; _pause ;;
+      4) _optimize_system; _pause ;;
+      5) _check_config; _pause ;;
+      6) _logs; _pause ;;
+      7) _service restart; _pause ;;
+      8) _service status; _pause ;;
+      9)
+        echo
+        echo "sp                                  打开主菜单"
+        echo "sing-box-sheldon install            安装/更新 sing-box"
+        echo "sing-box-sheldon doctor             自检服务器是否可用"
+        echo "sing-box-sheldon lowmem             应用省内存轻量配置"
+        echo "sing-box-sheldon optimize           应用系统性能优化"
+        echo "sing-box-sheldon check              检查 sing-box 配置"
+        echo "sing-box-sheldon logs               查看日志"
+        echo "sing-box-sheldon restart            重启 sing-box"
+        echo "sing-box-sheldon status             查看服务状态"
+        _pause
+        ;;
+      0) break ;;
+    esac
+  done
 }
 
 _main_menu() {
