@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.12
+# Version: 1.2.13
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.12"
+SCRIPT_VERSION="1.2.13"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -746,6 +746,7 @@ _table_users() {
 }
 
 _add_user() {
+  _init_dirs
   echo -e "${CYAN}支持协议: sheldon/sheldon-vless/vless-reality/sheldon-anytls/anytls-reality/vless/vmess/trojan/hysteria2/tuic/shadowsocks/anytls/socks${NC}"
   echo -e "${YELLOW}推荐: sheldon = VLESS + Reality + Vision + 公共站点伪装 + fp=chrome + NTP 校时${NC}"
   read -r -p "用户名: " name

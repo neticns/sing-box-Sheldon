@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.12`
 >
-> 脚本版本：`v1.2.12`
+> 脚本版本：`v1.2.13`
 
 ## 功能特性
 
@@ -120,7 +120,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.12]
+        [sing-box Sheldon 管理系统 V1.2.13]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.12
 ------------------------------------------------------------
@@ -190,6 +190,11 @@ sp
 /usr/local/bin/sing-box-sheldon
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
 ```
+
+## v1.2.13 用户添加修复
+
+- 修复直接执行 `./sing-box-sheldon.sh add-user` 时，首次添加用户没有初始化配置目录，导致 `config.json.tmp: No such file or directory` 的问题。
+- 已覆盖测试：`sheldon`、`vless`、`vmess`、`trojan`、`hysteria2`、`tuic`、`shadowsocks`、`anytls`、`socks` 用户添加路径。
 
 ## v1.2.12 更新脚本修复
 
