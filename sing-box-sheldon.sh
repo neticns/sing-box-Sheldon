@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.0
+# Version: 1.3.0
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -121,6 +121,105 @@ _install_script_shortcut() {
   fi
 }
 
+_get_public_ip() {
+  local ip
+  ip=$(curl -4 -s --max-time 6 https://api.ipify.org 2>/dev/null || true)
+  [ -n "$ip" ] || ip=$(curl -4 -s --max-time 6 https://ifconfig.me 2>/dev/null || true)
+  [ -n "$ip" ] || ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  echo "$ip"
+}
+
+_open_firewall_port() {
+  local port="$1" proto="${2:-tcp}"
+  if _has ufw; then ufw allow "${port}/${proto}" >/dev/null 2>&1 || true; fi
+  if _has firewall-cmd; then firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi
+}
+
+_port_in_use() {
+  local port="$1"
+  if _has ss; then ss -lntup 2>/dev/null | grep -qE ":${port}[[:space:]]" && return 0; fi
+  if _has netstat; then netstat -lntup 2>/dev/null | grep -qE ":${port}[[:space:]]" && return 0; fi
+  return 1
+}
+
+_latest_singbox_version() {
+  local tag api="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+  if _has curl; then tag=$(curl -fsSL --connect-timeout 10 --max-time 20 "$api" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' | head -1); fi
+  if [ -z "$tag" ] && _has wget; then tag=$(wget -qO- --timeout=20 "$api" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' | head -1); fi
+  echo "${tag:-$SINGBOX_VERSION}"
+}
+
+_sync_latest_version() {
+  local latest
+  _ensure_core_deps >/dev/null 2>&1 || true
+  latest="$(_latest_singbox_version)"
+  if [ -n "$latest" ]; then
+    SINGBOX_VERSION="$latest"
+    _ok "已使用最新 sing-box 稳定版: v${SINGBOX_VERSION}"
+  fi
+}
+
+_generate_reality_keypair() {
+  if _has sing-box; then sing-box generate reality-keypair 2>/dev/null; return; fi
+  if [ -x "$BIN_PATH" ]; then "$BIN_PATH" generate reality-keypair 2>/dev/null; return; fi
+  _warn "sing-box 未安装，安装核心后可生成 Reality 密钥"
+}
+
+_generate_uuid() {
+  if _has sing-box; then sing-box generate uuid 2>/dev/null && return; fi
+  _rand_uuid
+}
+
+_uninstall_all() {
+  _need_root
+  read -r -p "确认卸载 sing-box Sheldon 和 sing-box 服务？输入 yes: " yes
+  [ "$yes" = "yes" ] || { _warn "已取消"; return; }
+  _service stop >/dev/null 2>&1 || true
+  if _has systemctl; then systemctl disable sing-box >/dev/null 2>&1 || true; rm -f /etc/systemd/system/sing-box.service; rm -rf /etc/systemd/system/sing-box.service.d; systemctl daemon-reload || true; fi
+  if _has rc-update; then rc-update del sing-box default >/dev/null 2>&1 || true; rm -f /etc/init.d/sing-box; fi
+  rm -f "$BIN_PATH" "$SP_PATH" "$SCRIPT_PATH" /etc/sysctl.d/99-sing-box-sheldon.conf
+  _ok "已卸载二进制/服务/sp 快捷命令；配置目录保留: $SINGBOX_DIR"
+}
+
+_system_tools_menu() {
+  while true; do
+    clear
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${BOLD}${WHITE}                    系统工具${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "    ${BLUE}1.${NC} ${GREEN}安装/修复依赖库${NC}"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}开启 BBR/系统优化${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}查看端口监听${NC}"
+    echo -e "    ${BLUE}4.${NC} ${GREEN}查看系统信息${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}生成 UUID${NC}"
+    echo -e "    ${BLUE}6.${NC} ${GREEN}生成 Reality 密钥对${NC}"
+    echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
+    read -r -p "请选择操作: " c
+    case "$c" in
+      1) _ensure_core_deps; _pause ;;
+      2) _optimize_system; _pause ;;
+      3) (_has ss && ss -tulnp) || (_has netstat && netstat -tulnp) || echo "缺少 ss/netstat"; _pause ;;
+      4) uname -a; echo; free -h 2>/dev/null || true; df -h 2>/dev/null || true; _pause ;;
+      5) _generate_uuid; _pause ;;
+      6) _generate_reality_keypair; _pause ;;
+      0) break ;;
+    esac
+  done
+}
+
+_warp_menu() {
+  echo -e "${CYAN}WARP 分流说明${NC}"
+  echo "当前轻量版提供 WireGuard/WARP 配置占位和手动接入入口。"
+  echo "建议先用 wgcf/warp-go 生成 wireguard outbound，再通过中转/分流菜单写入 route rules。"
+  echo
+  echo "后续可扩展为：自动安装 wgcf、注册 WARP、生成 outbound、按 OpenAI/Netflix/Google 分流。"
+}
+
+_relay_menu() {
+  echo -e "${CYAN}中转管理说明${NC}"
+  echo "当前版本保留轻量直连节点管理；中转功能建议使用 sing-box 的 inbound -> outbound -> route.rules 模式。"
+  echo "下一版可继续加入链接解析导入：vless/vmess/trojan/hy2/tuic/ss/anytls/socks5。"
+}
 
 _arch() {
   case "$(uname -m)" in
@@ -324,9 +423,11 @@ _add_user() {
   read -r -p "重置日 [不重置]: " reset; reset="${reset:-不重置}"
   read -r -p "到期时间 [永久]: " expire; expire="${expire:-永久}"
   local uuid pass tag
-  uuid="$(_rand_uuid)"; pass="$(_rand_pass)"; tag="user-$name"
+  uuid="$(_generate_uuid)"; pass="$(_rand_pass)"; tag="user-$name"
   _add_inbound_json "$proto" "$tag" "$port" "$uuid" "$pass" || return
   _add_user_record "$name" "开启" "$plan" "$reset" "$expire" "$port" "$proto" "$uuid" "$pass" "$tag"
+  _open_firewall_port "$port" tcp
+  case "$proto" in hysteria2|hy2|tuic) _open_firewall_port "$port" udp ;; esac
   _check_config || { _err "配置检查失败，已写入但未重启，请手动修正"; return; }
   _service restart >/dev/null 2>&1 || true
   _ok "用户已添加"
@@ -399,6 +500,7 @@ EOF
 _install_update() {
   _need_root
   _ensure_core_deps || { _err "依赖安装失败"; return; }
+  _sync_latest_version
   _download_singbox || { _err "下载失败"; return; }
   _install_service
   _optimize_system
@@ -456,23 +558,31 @@ _main_menu() {
     echo -e " sing-box : ${GREEN}$(_status_text)${NC}   版本 ${CYAN}$(_core_version || echo 未安装)${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     echo -e "    ${BLUE}1.${NC} ${GREEN}安装/更新 sing-box 最新稳定版${NC}"
-    echo -e "    ${BLUE}2.${NC} ${GREEN}系统性能优化/省内存${NC}"
-    echo -e "    ${BLUE}3.${NC} ${GREEN}协议支持说明${NC}"
-    echo -e "    ${BLUE}4.${NC} ${GREEN}用户管理${NC}"
-    echo -e "    ${BLUE}5.${NC} ${GREEN}检查配置${NC}"
-    echo -e "    ${BLUE}6.${NC} ${GREEN}重启 sing-box${NC}"
-    echo -e "    ${BLUE}7.${NC} ${GREEN}查看日志${NC}"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}系统工具${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}协议管理/支持说明${NC}"
+    echo -e "    ${BLUE}4.${NC} ${GREEN}中转管理${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}WARP 分流${NC}"
+    echo -e "    ${BLUE}6.${NC} ${GREEN}导出节点配置${NC}"
+    echo -e "    ${BLUE}7.${NC} ${GREEN}用户管理${NC}"
+    echo -e "    ${BLUE}8.${NC} ${GREEN}检查配置${NC}"
+    echo -e "    ${BLUE}9.${NC} ${GREEN}重启 sing-box${NC}"
+    echo -e "    ${BLUE}10.${NC} ${GREEN}查看日志${NC}"
+    echo -e "    ${BLUE}11.${NC} ${GREEN}卸载 sing-box${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}退出系统${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     read -r -p "请选择操作指令: " choice
     case "$choice" in
       1) _install_update; _pause ;;
-      2) _optimize_system; _pause ;;
+      2) _system_tools_menu ;;
       3) _proto_menu; _pause ;;
-      4) _user_menu ;;
-      5) _check_config; _pause ;;
-      6) _service restart; _pause ;;
-      7) _logs; _pause ;;
+      4) _relay_menu; _pause ;;
+      5) _warp_menu; _pause ;;
+      6) _export_user; _pause ;;
+      7) _user_menu ;;
+      8) _check_config; _pause ;;
+      9) _service restart; _pause ;;
+      10) _logs; _pause ;;
+      11) _uninstall_all; _pause ;;
       0) exit 0 ;;
     esac
   done
@@ -481,7 +591,12 @@ _main_menu() {
 _cli() {
   case "${1:-}" in
     install|update) _install_update ;;
+    latest) _sync_latest_version; echo "$SINGBOX_VERSION" ;;
     optimize) _optimize_system ;;
+    deps|repair) _ensure_core_deps ;;
+    relay) _relay_menu ;;
+    warp) _warp_menu ;;
+    uninstall) _uninstall_all ;;
     restart) _service restart ;;
     start) _service start ;;
     stop) _service stop ;;
