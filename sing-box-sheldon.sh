@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.14
+# Version: 1.2.15
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.14"
+SCRIPT_VERSION="1.2.15"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -21,6 +21,8 @@ ARGO_BIN="/usr/local/bin/cloudflared"
 ARGO_SERVICE="cloudflared-sheldon"
 ARGO_CONFIG="$ARGO_DIR/config.yml"
 ARGO_INFO="$ARGO_DIR/tunnel.info"
+SCRIPT_UPDATE_CACHE="/tmp/sing-box-sheldon-update.cache"
+SCRIPT_UPDATE_CACHE_TTL=21600
 
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033[36m'; WHITE='\033[37m'; NC='\033[0m'
 BOLD='\033[1m'
@@ -374,9 +376,43 @@ _migrate_config_latest() {
   ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
 }
 
+_version_gt() {
+  [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ] && [ "$1" != "$2" ]
+}
+
+_remote_script_version() {
+  local data ver
+  if _has curl; then
+    data=$(curl -fsSL --connect-timeout 3 --max-time 6 "$SCRIPT_UPDATE_URL" 2>/dev/null || true)
+  elif _has wget; then
+    data=$(wget -qO- --timeout=6 "$SCRIPT_UPDATE_URL" 2>/dev/null || true)
+  fi
+  ver=$(printf '%s\n' "$data" | sed -n 's/^SCRIPT_VERSION="\([^"]*\)".*/\1/p' | head -1)
+  echo "$ver"
+}
+
+_check_script_update_hint() {
+  local now cache_ts cache_ver remote_ver
+  now=$(date +%s 2>/dev/null || echo 0)
+  if [ -s "$SCRIPT_UPDATE_CACHE" ]; then
+    IFS='|' read -r cache_ts cache_ver < "$SCRIPT_UPDATE_CACHE" || true
+    if [ -n "$cache_ts" ] && [ $((now - cache_ts)) -lt "$SCRIPT_UPDATE_CACHE_TTL" ]; then
+      remote_ver="$cache_ver"
+    fi
+  fi
+  if [ -z "$remote_ver" ]; then
+    remote_ver="$(_remote_script_version)"
+    [ -n "$remote_ver" ] && printf '%s|%s\n' "$now" "$remote_ver" > "$SCRIPT_UPDATE_CACHE" 2>/dev/null || true
+  fi
+  if [ -n "$remote_ver" ] && _version_gt "$remote_ver" "$SCRIPT_VERSION"; then
+    echo -e "${YELLOW}提醒：发现 Sheldon 脚本新版本 v${remote_ver}，当前 v${SCRIPT_VERSION}。主菜单选 10 或运行 sp script-update 更新。${NC}"
+  fi
+}
+
 _self_check() {
   echo -e "${CYAN}sing-box Sheldon 自检${NC}"
   echo "脚本版本: ${SCRIPT_VERSION}"
+  _check_script_update_hint
   echo "系统架构: $(uname -m)"
   echo "系统类型: $(_detect_os 2>/dev/null || echo unknown)"
   echo
@@ -1346,6 +1382,8 @@ _main_menu() {
     echo -e "${BOLD}${WHITE}        [sing-box Sheldon 管理系统 V${SCRIPT_VERSION}]${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     echo -e " sing-box : ${GREEN}$(_status_text)${NC}   版本 ${CYAN}$(_core_version || echo 未安装)${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    _check_script_update_hint
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     echo -e "    ${BLUE}1.${NC} ${GREEN}安装/更新 sing-box 最新稳定版${NC}"
     echo -e "    ${BLUE}2.${NC} ${GREEN}系统工具${NC}"
