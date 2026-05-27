@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.13
+# Version: 1.2.14
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.13"
+SCRIPT_VERSION="1.2.14"
 SINGBOX_VERSION="1.13.12"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -230,6 +230,61 @@ _ensure_ntp_config() {
 _generate_uuid() {
   if _has sing-box; then sing-box generate uuid 2>/dev/null && return; fi
   _rand_uuid
+}
+
+_protocol_menu_choice() {
+  echo -e "${CYAN}请选择协议:${NC}" >&2
+  echo "  1. sheldon（推荐，VLESS + Reality + Vision）" >&2
+  echo "  2. sheldon-vless / vless-reality" >&2
+  echo "  3. sheldon-anytls / anytls-reality" >&2
+  echo "  4. vless" >&2
+  echo "  5. vmess" >&2
+  echo "  6. trojan" >&2
+  echo "  7. hysteria2" >&2
+  echo "  8. tuic" >&2
+  echo "  9. shadowsocks" >&2
+  echo "  10. anytls" >&2
+  echo "  11. socks" >&2
+  read -r -p "协议编号 [1]: " proto_choice
+  case "${proto_choice:-1}" in
+    1) echo "sheldon" ;;
+    2) echo "sheldon-vless" ;;
+    3) echo "sheldon-anytls" ;;
+    4) echo "vless" ;;
+    5) echo "vmess" ;;
+    6) echo "trojan" ;;
+    7) echo "hysteria2" ;;
+    8) echo "tuic" ;;
+    9) echo "shadowsocks" ;;
+    10) echo "anytls" ;;
+    11) echo "socks" ;;
+    *) _err "协议编号错误" >&2; return 1 ;;
+  esac
+}
+
+_random_free_port() {
+  local p tries=0
+  while [ "$tries" -lt 80 ]; do
+    p=$(awk 'BEGIN{srand(); print int(20000 + rand() * 40000)}')
+    if ! _port_in_use "$p"; then echo "$p"; return 0; fi
+    tries=$((tries+1))
+    sleep 0.02 2>/dev/null || true
+  done
+  _err "随机端口生成失败" >&2
+  return 1
+}
+
+_read_listen_port() {
+  local prompt="${1:-监听端口（留空随机）: }" port
+  read -r -p "$prompt" port
+  if [ -z "$port" ]; then
+    port="$(_random_free_port)" || return 1
+    _ok "已随机选择端口: $port" >&2
+  fi
+  [[ "$port" =~ ^[0-9]+$ ]] || { _err "端口错误" >&2; return 1; }
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { _err "端口范围必须是 1-65535" >&2; return 1; }
+  if _port_in_use "$port"; then _err "端口已占用" >&2; return 1; fi
+  echo "$port"
 }
 
 _uninstall_all() {
@@ -751,10 +806,8 @@ _add_user() {
   echo -e "${YELLOW}推荐: sheldon = VLESS + Reality + Vision + 公共站点伪装 + fp=chrome + NTP 校时${NC}"
   read -r -p "用户名: " name
   [ -n "$name" ] || { _err "用户名不能为空"; return; }
-  read -r -p "协议 [sheldon]: " proto; proto="${proto:-sheldon}"
-  read -r -p "监听端口: " port
-  [[ "$port" =~ ^[0-9]+$ ]] || { _err "端口错误"; return; }
-  if _has ss && ss -lntup 2>/dev/null | grep -q ":$port "; then _err "端口已占用"; return; fi
+  proto="$(_protocol_menu_choice)" || return
+  port="$(_read_listen_port "监听端口（留空随机）: ")" || return
   read -r -p "套餐 [不限]: " plan; plan="${plan:-不限}"
   read -r -p "重置日 [不重置]: " reset; reset="${reset:-不重置}"
   read -r -p "到期时间 [永久]: " expire; expire="${expire:-永久}"
@@ -780,10 +833,8 @@ _create_protocol_only() {
   echo -e "${CYAN}支持协议: sheldon/sheldon-vless/vless-reality/sheldon-anytls/anytls-reality/vless/vmess/trojan/hysteria2/tuic/shadowsocks/anytls/socks${NC}"
   local name proto port uuid pass tag host
   read -r -p "协议备注 [sheldon]: " name; name="${name:-sheldon}"
-  read -r -p "协议 [sheldon]: " proto; proto="${proto:-sheldon}"
-  read -r -p "监听端口: " port
-  [[ "$port" =~ ^[0-9]+$ ]] || { _err "端口错误"; return; }
-  if _has ss && ss -lntup 2>/dev/null | grep -q ":$port "; then _err "端口已占用"; return; fi
+  proto="$(_protocol_menu_choice)" || return
+  port="$(_read_listen_port "监听端口（留空随机）: ")" || return
   uuid="$(_generate_uuid)"; pass="$(_rand_pass)"; tag="proto-${name}-${port}"
   tag=$(echo "$tag" | tr -cs 'A-Za-z0-9_.-' '-')
   _add_inbound_json "$proto" "$tag" "$port" "$uuid" "$pass" || return
