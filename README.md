@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.13`
 >
-> 脚本版本：`v1.2.19`
+> 脚本版本：`v1.2.20`
 
 ## 功能特性
 
@@ -58,6 +58,11 @@
   - TCP / UDP / both 转发
   - 新增 / 删除 / 清空 / 应用规则
   - systemd 开机自动应用
+- 分流 / 路由规则管理
+  - 支持 `domain_suffix` / `domain_keyword` / `domain` / `domain_regex`
+  - 支持 IP CIDR 规则
+  - 支持设置 `route.final`
+  - 规则持久化保存，应用前校验 outbound tag 和 sing-box 配置
 - Argo 隧道管理
   - 安装/更新 cloudflared 最新版
   - 支持 Cloudflare Quick Tunnel 临时隧道
@@ -122,7 +127,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.19]
+        [sing-box Sheldon 管理系统 V1.2.20]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.13
 ------------------------------------------------------------
@@ -130,7 +135,7 @@ sudo ./sing-box-sheldon.sh
     2. 系统工具
     3. 协议管理
     4. 中转管理
-    5. WARP 分流
+    5. 分流/路由规则管理
     6. 用户管理
     7. 端口转发管理
     8. Argo 隧道管理
@@ -161,6 +166,11 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh logs         # 查看日志
 ./sing-box-sheldon.sh doctor       # 脚本自检/可用性检测
 ./sing-box-sheldon.sh relay        # 中转管理
+./sing-box-sheldon.sh route        # 分流/路由规则管理
+./sing-box-sheldon.sh split        # 同 route
+./sing-box-sheldon.sh route-list   # 查看已保存分流规则
+./sing-box-sheldon.sh route-apply  # 应用分流规则并检查配置
+./sing-box-sheldon.sh route-clear  # 清空并应用分流规则
 ./sing-box-sheldon.sh proto        # 协议管理
 ./sing-box-sheldon.sh create-protocol # 直接创建协议入站
 ./sing-box-sheldon.sh pf           # 端口转发管理
@@ -197,6 +207,26 @@ sp
 ```text
 /usr/local/bin/sing-box-sheldon
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
+```
+
+## v1.2.20 分流 / 路由规则管理
+
+- 主菜单 `5. 分流/路由规则管理` 已从说明占位改为可管理规则。
+- 规则保存到 `/usr/local/etc/sing-box/route.rules`，应用后的规则快照保存到 `/usr/local/etc/sing-box/route.applied.rules`。
+- 应用时写入 `config.json` 的 `route.rules`，只使用 sing-box 1.13.x 可检查通过的字段：`action:"route"`、`outbound`、`domain_suffix` / `domain_keyword` / `domain` / `domain_regex` / `ip_cidr`。
+- 不向 sing-box 规则写入未知 marker 字段；脚本通过已应用快照识别并移除旧的 Sheldon 管理规则，保留其他手写路由规则。
+- outbound 必须是当前 `config.json` 已存在的出站标签，可选 `direct`、`block` 或手动添加的 wireguard/WARP 等 outbound tag。
+- 命令行支持 `route` / `split`、`route-list`、`route-apply`、`route-clear`。
+
+示例：
+
+```bash
+./sing-box-sheldon.sh route
+./sing-box-sheldon.sh route-add domain_suffix openai.com direct
+./sing-box-sheldon.sh route-add domain_keyword netflix block
+./sing-box-sheldon.sh route-add-cidr 1.1.1.0/24 direct
+./sing-box-sheldon.sh route-final direct
+./sing-box-sheldon.sh route-apply
 ```
 
 ## v1.2.19 用户连接数限制
@@ -519,6 +549,8 @@ sp
 /usr/local/bin/sing-box                 # sing-box 核心
 /usr/local/etc/sing-box/config.json     # 主配置文件
 /usr/local/etc/sing-box/users.json      # 用户记录
+/usr/local/etc/sing-box/route.rules     # Sheldon 分流规则状态
+/usr/local/etc/sing-box/route.applied.rules # Sheldon 已应用分流规则快照
 /etc/systemd/system/sing-box.service    # systemd 服务文件
 /etc/init.d/sing-box                    # OpenRC 服务文件
 ```

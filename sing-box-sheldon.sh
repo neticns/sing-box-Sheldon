@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.19
+# Version: 1.2.20
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.19"
+SCRIPT_VERSION="1.2.20"
 SINGBOX_VERSION="1.13.13"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -17,6 +17,8 @@ SP_PATH="/usr/local/bin/sp"
 SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/neticns/sing-box-Sheldon/main/sing-box-sheldon.sh"
 PF_FILE="$SINGBOX_DIR/port_forward.rules"
 CONNLIMIT_FILE="$SINGBOX_DIR/connlimit.rules"
+ROUTE_RULE_FILE="$SINGBOX_DIR/route.rules"
+ROUTE_APPLIED_FILE="$SINGBOX_DIR/route.applied.rules"
 CONNLIMIT_CHAIN="SING_BOX_SHELDON_CONNLIMIT"
 CONNLIMIT_COMMENT="sing-box-sheldon-connlimit"
 ARGO_DIR="$SINGBOX_DIR/argo"
@@ -610,6 +612,282 @@ _port_forward_menu() {
       3) _port_forward_apply; _pause ;;
       4) _port_forward_clear; _pause ;;
       5) _port_forward_persist; _pause ;;
+      0) break ;;
+    esac
+  done
+}
+
+_route_state_init() {
+  _jq
+  mkdir -p "$SINGBOX_DIR"
+  if [ ! -s "$ROUTE_RULE_FILE" ]; then
+    printf '{"final":"direct","rules":[]}\n' > "$ROUTE_RULE_FILE"
+  elif ! jq -e 'type=="object" and (.rules|type=="array")' "$ROUTE_RULE_FILE" >/dev/null 2>&1; then
+    _err "分流规则文件格式无效: $ROUTE_RULE_FILE"
+    return 1
+  fi
+  local tmp="${ROUTE_RULE_FILE}.tmp"
+  jq '.final = (.final // "direct") | .rules = (.rules // [])' "$ROUTE_RULE_FILE" > "$tmp" && mv "$tmp" "$ROUTE_RULE_FILE"
+}
+
+_route_outbound_exists() {
+  _jq
+  local tag="$1"
+  [ -n "$tag" ] || return 1
+  [ -s "$CONFIG_FILE" ] || return 1
+  jq -e --arg tag "$tag" '(.outbounds // []) | any(.tag == $tag)' "$CONFIG_FILE" >/dev/null 2>&1
+}
+
+_route_outbound_tags() {
+  _jq
+  [ -s "$CONFIG_FILE" ] || return 0
+  jq -r '.outbounds[]? | .tag // empty' "$CONFIG_FILE"
+}
+
+_route_validate_kind() {
+  case "$1" in
+    domain_suffix|domain_keyword|domain|domain_regex|ip_cidr) return 0 ;;
+    *) _err "规则类型只能是 domain_suffix/domain_keyword/domain/domain_regex/ip_cidr"; return 1 ;;
+  esac
+}
+
+_route_validate_cidr() {
+  local cidr="$1" ip prefix
+  case "$cidr" in */*) ;; *) _err "CIDR 格式应类似 1.1.1.0/24 或 2001:db8::/32"; return 1 ;; esac
+  ip="${cidr%/*}"; prefix="${cidr##*/}"
+  [[ "$prefix" =~ ^[0-9]+$ ]] || { _err "CIDR 前缀必须是数字"; return 1; }
+  if [[ "$ip" == *:* ]]; then
+    [ "$prefix" -ge 0 ] 2>/dev/null && [ "$prefix" -le 128 ] 2>/dev/null || { _err "IPv6 CIDR 前缀必须在 0-128"; return 1; }
+    [[ "$ip" =~ ^[0-9A-Fa-f:.]+$ ]] || { _err "IPv6 CIDR 地址包含非法字符"; return 1; }
+  else
+    [ "$prefix" -ge 0 ] 2>/dev/null && [ "$prefix" -le 32 ] 2>/dev/null || { _err "IPv4 CIDR 前缀必须在 0-32"; return 1; }
+    local IFS=. a b c d extra
+    read -r a b c d extra <<EOF
+$ip
+EOF
+    [ -z "$extra" ] && [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] || { _err "IPv4 CIDR 地址格式无效"; return 1; }
+    for oct in "$a" "$b" "$c" "$d"; do
+      [[ "$oct" =~ ^[0-9]+$ ]] && [ "$oct" -ge 0 ] && [ "$oct" -le 255 ] || { _err "IPv4 CIDR 地址格式无效"; return 1; }
+    done
+  fi
+}
+
+_route_validate_value() {
+  local kind="$1" value="$2"
+  [ -n "$value" ] || { _err "规则值不能为空"; return 1; }
+  case "$kind" in
+    ip_cidr) _route_validate_cidr "$value" ;;
+    domain|domain_suffix|domain_keyword|domain_regex)
+      case "$value" in *[[:space:]]*) _err "域名规则值不能包含空白字符"; return 1 ;; esac
+      return 0
+      ;;
+  esac
+}
+
+_route_pick_outbound() {
+  local tag="$1"
+  if [ -z "$tag" ]; then
+    echo "可用 outbound tag:" >&2
+    _route_outbound_tags | sed 's/^/  - /' >&2
+    read -r -p "出站标签 [direct]: " tag
+    tag="${tag:-direct}"
+  fi
+  _route_outbound_exists "$tag" || { _err "出站标签不存在: $tag"; return 1; }
+  printf '%s\n' "$tag"
+}
+
+_route_list() {
+  _route_state_init || return 1
+  local final any=0
+  final=$(jq -r '.final // "direct"' "$ROUTE_RULE_FILE")
+  echo -e "${BLUE}--------------------------------------------------------------------------------${NC}"
+  echo -e "${GREEN}route.final:${NC} $final"
+  printf "${GREEN}%-5s %-18s %-28s %-18s${NC}\n" "序号" "类型" "规则值" "出站"
+  echo -e "${BLUE}--------------------------------------------------------------------------------${NC}"
+  jq -r '.rules[]? | [.type,.value,.outbound] | @tsv' "$ROUTE_RULE_FILE" | \
+  while IFS=$'\t' read -r kind value outbound; do
+    any=1
+    printf "%-5s %-18s %-28s %-18s\n" "$((++i))" "$kind" "$value" "$outbound"
+  done
+  if ! jq -e '.rules | length > 0' "$ROUTE_RULE_FILE" >/dev/null 2>&1; then
+    echo "暂无 Sheldon 管理的分流规则"
+  fi
+}
+
+_route_add_rule() {
+  _init_dirs
+  _route_state_init || return 1
+  local kind="$1" value="$2" outbound="$3" tmp
+  if [ -z "$kind" ]; then
+    echo "规则类型: 1 domain_suffix  2 domain_keyword  3 domain  4 domain_regex"
+    read -r -p "请选择类型: " kind
+    case "$kind" in
+      1) kind="domain_suffix" ;;
+      2) kind="domain_keyword" ;;
+      3) kind="domain" ;;
+      4) kind="domain_regex" ;;
+    esac
+  fi
+  _route_validate_kind "$kind" || return 1
+  [ "$kind" != "ip_cidr" ] || { _err "添加 CIDR 请使用 IP CIDR 入口或 route-add-cidr"; return 1; }
+  if [ -z "$value" ]; then read -r -p "规则值: " value; fi
+  _route_validate_value "$kind" "$value" || return 1
+  outbound="$(_route_pick_outbound "$outbound")" || return 1
+  tmp="${ROUTE_RULE_FILE}.tmp"
+  jq --arg kind "$kind" --arg value "$value" --arg outbound "$outbound" \
+    '.rules += [{type:$kind,value:$value,outbound:$outbound}]' \
+    "$ROUTE_RULE_FILE" > "$tmp" && mv "$tmp" "$ROUTE_RULE_FILE"
+  _ok "已保存分流规则"
+}
+
+_route_add_cidr() {
+  _init_dirs
+  _route_state_init || return 1
+  local cidr="$1" outbound="$2" tmp
+  if [ -z "$cidr" ]; then read -r -p "IP CIDR: " cidr; fi
+  _route_validate_value ip_cidr "$cidr" || return 1
+  outbound="$(_route_pick_outbound "$outbound")" || return 1
+  tmp="${ROUTE_RULE_FILE}.tmp"
+  jq --arg value "$cidr" --arg outbound "$outbound" \
+    '.rules += [{type:"ip_cidr",value:$value,outbound:$outbound}]' \
+    "$ROUTE_RULE_FILE" > "$tmp" && mv "$tmp" "$ROUTE_RULE_FILE"
+  _ok "已保存 IP CIDR 分流规则"
+}
+
+_route_delete() {
+  _route_state_init || return 1
+  local idx="$1" count tmp
+  [ -n "$idx" ] || _route_list
+  if [ -z "$idx" ]; then read -r -p "要删除的序号: " idx; fi
+  [[ "$idx" =~ ^[0-9]+$ ]] || return 1
+  count=$(jq '.rules | length' "$ROUTE_RULE_FILE")
+  [ "$idx" -ge 1 ] 2>/dev/null && [ "$idx" -le "$count" ] 2>/dev/null || { _err "序号不存在"; return 1; }
+  tmp="${ROUTE_RULE_FILE}.tmp"
+  jq --argjson idx "$((idx-1))" '.rules |= [to_entries[] | select(.key != $idx) | .value]' "$ROUTE_RULE_FILE" > "$tmp" && mv "$tmp" "$ROUTE_RULE_FILE"
+  _ok "已删除分流规则"
+}
+
+_route_clear_state() {
+  _route_state_init || return 1
+  local tmp="${ROUTE_RULE_FILE}.tmp"
+  jq '.rules = []' "$ROUTE_RULE_FILE" > "$tmp" && mv "$tmp" "$ROUTE_RULE_FILE"
+  _ok "已清空已保存的分流规则；执行应用后会从 config.json 移除已应用规则"
+}
+
+_route_set_final() {
+  _init_dirs
+  _route_state_init || return 1
+  local outbound="$1" tmp
+  outbound="$(_route_pick_outbound "$outbound")" || return 1
+  tmp="${ROUTE_RULE_FILE}.tmp"
+  jq --arg outbound "$outbound" '.final = $outbound' "$ROUTE_RULE_FILE" > "$tmp" && mv "$tmp" "$ROUTE_RULE_FILE"
+  _ok "已保存 route.final: $outbound"
+}
+
+_route_render_rules_json() {
+  jq -c '
+    [.rules[]? |
+      if .type == "domain_suffix" then {action:"route", outbound:.outbound, domain_suffix:[.value]}
+      elif .type == "domain_keyword" then {action:"route", outbound:.outbound, domain_keyword:[.value]}
+      elif .type == "domain" then {action:"route", outbound:.outbound, domain:[.value]}
+      elif .type == "domain_regex" then {action:"route", outbound:.outbound, domain_regex:[.value]}
+      elif .type == "ip_cidr" then {action:"route", outbound:.outbound, ip_cidr:[.value]}
+      else empty end
+    ]' "$ROUTE_RULE_FILE"
+}
+
+_route_apply_to_file() {
+  local config="$1" state="$2" applied="$3" out="$4"
+  jq --slurpfile state "$state" --slurpfile old "$applied" '
+    def sig:
+      {
+        action:(.action // null),
+        outbound:(.outbound // null),
+        domain:(.domain // null),
+        domain_suffix:(.domain_suffix // null),
+        domain_keyword:(.domain_keyword // null),
+        domain_regex:(.domain_regex // null),
+        ip_cidr:(.ip_cidr // null)
+      };
+    def managed_rule($r):
+      if $r.type == "domain_suffix" then {action:"route", outbound:$r.outbound, domain_suffix:[$r.value]}
+      elif $r.type == "domain_keyword" then {action:"route", outbound:$r.outbound, domain_keyword:[$r.value]}
+      elif $r.type == "domain" then {action:"route", outbound:$r.outbound, domain:[$r.value]}
+      elif $r.type == "domain_regex" then {action:"route", outbound:$r.outbound, domain_regex:[$r.value]}
+      elif $r.type == "ip_cidr" then {action:"route", outbound:$r.outbound, ip_cidr:[$r.value]}
+      else empty end;
+    (($old[0] // []) | map(sig)) as $old_sigs |
+    (($state[0].rules // []) | map(managed_rule(.))) as $new_rules |
+    .route = (.route // {}) |
+    .route.rules = (((.route.rules // []) | map(select((sig as $s | any($old_sigs[]?; . == $s)) | not))) + $new_rules) |
+    .route.final = ($state[0].final // .route.final // "direct")
+  ' "$config" > "$out"
+}
+
+_route_validate_state() {
+  _route_state_init || return 1
+  local bad
+  bad=$(jq -r '.rules[]? | select((.type|type!="string") or (.value|type!="string") or (.outbound|type!="string") or (.value=="") or (.outbound=="")) | @json' "$ROUTE_RULE_FILE" | head -1)
+  [ -z "$bad" ] || { _err "分流规则文件包含无效记录: $bad"; return 1; }
+  while IFS=$'\t' read -r kind value outbound; do
+    _route_validate_kind "$kind" || return 1
+    _route_validate_value "$kind" "$value" || return 1
+    _route_outbound_exists "$outbound" || { _err "规则引用的出站标签不存在: $outbound"; return 1; }
+  done < <(jq -r '.rules[]? | [.type,.value,.outbound] | @tsv' "$ROUTE_RULE_FILE")
+  local final
+  final=$(jq -r '.final // "direct"' "$ROUTE_RULE_FILE")
+  _route_outbound_exists "$final" || { _err "route.final 出站标签不存在: $final"; return 1; }
+}
+
+_route_apply() {
+  _init_dirs
+  _route_validate_state || return 1
+  local cfg_bak tmp applied_tmp new_rules
+  cfg_bak="$(mktemp /tmp/sing-box-config.XXXXXX)" || return 1
+  tmp="$(mktemp /tmp/sing-box-config-route.XXXXXX)" || { rm -f "$cfg_bak"; return 1; }
+  applied_tmp="$(mktemp /tmp/sing-box-route-applied.XXXXXX)" || { rm -f "$cfg_bak" "$tmp"; return 1; }
+  cp "$CONFIG_FILE" "$cfg_bak"
+  [ -s "$ROUTE_APPLIED_FILE" ] || printf '[]\n' > "$ROUTE_APPLIED_FILE"
+  _route_apply_to_file "$CONFIG_FILE" "$ROUTE_RULE_FILE" "$ROUTE_APPLIED_FILE" "$tmp" || { rm -f "$cfg_bak" "$tmp" "$applied_tmp"; return 1; }
+  cp "$tmp" "$CONFIG_FILE"
+  if _check_config; then
+    new_rules="$(_route_render_rules_json)" || { cp "$cfg_bak" "$CONFIG_FILE"; rm -f "$cfg_bak" "$tmp" "$applied_tmp"; return 1; }
+    printf '%s\n' "$new_rules" > "$applied_tmp" && mv "$applied_tmp" "$ROUTE_APPLIED_FILE"
+    _service restart >/dev/null 2>&1 || true
+    rm -f "$cfg_bak" "$tmp"
+    _ok "分流规则已应用并重启 sing-box"
+  else
+    cp "$cfg_bak" "$CONFIG_FILE"
+    rm -f "$cfg_bak" "$tmp" "$applied_tmp"
+    _err "配置检查失败，已回滚分流规则修改"
+    return 1
+  fi
+}
+
+_route_menu() {
+  while true; do
+    clear
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${BOLD}${WHITE}                    分流 / 路由规则管理${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    _route_list
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${YELLOW}WARP 可先手动加入 wireguard outbound，再把规则出站选为该 outbound tag。${NC}"
+    echo -e "    ${BLUE}1.${NC} ${GREEN}新增域名分流规则${NC}"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}新增 IP CIDR 分流规则${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}删除分流规则${NC}"
+    echo -e "    ${BLUE}4.${NC} ${GREEN}清空分流规则${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}设置 route.final 出站${NC}"
+    echo -e "    ${BLUE}6.${NC} ${GREEN}应用分流规则并重启${NC}"
+    echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
+    read -r -p "请选择操作: " c
+    case "$c" in
+      1) _route_add_rule; _pause ;;
+      2) _route_add_cidr; _pause ;;
+      3) _route_delete; _pause ;;
+      4) _route_clear_state; _pause ;;
+      5) _route_set_final; _pause ;;
+      6) _route_apply; _pause ;;
       0) break ;;
     esac
   done
@@ -1866,6 +2144,10 @@ _command_menu() {
         echo "sing-box-sheldon logs               查看日志"
         echo "sing-box-sheldon restart            重启 sing-box"
         echo "sing-box-sheldon status             查看服务状态"
+        echo "sing-box-sheldon route              分流/路由规则管理"
+        echo "sing-box-sheldon route-list         查看分流规则"
+        echo "sing-box-sheldon route-apply        应用分流规则"
+        echo "sing-box-sheldon route-clear        清空并应用分流规则"
         echo "sing-box-sheldon argo               Argo 隧道管理"
         echo "sing-box-sheldon argo-status        查看 Argo 状态"
         echo "sing-box-sheldon limit-user         修改用户限速"
@@ -1896,7 +2178,7 @@ _main_menu() {
     echo -e "    ${BLUE}2.${NC} ${GREEN}系统工具${NC}"
     echo -e "    ${BLUE}3.${NC} ${GREEN}协议管理/支持说明${NC}"
     echo -e "    ${BLUE}4.${NC} ${GREEN}中转管理${NC}"
-    echo -e "    ${BLUE}5.${NC} ${GREEN}WARP 分流${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}分流/路由规则管理${NC}"
     echo -e "    ${BLUE}6.${NC} ${GREEN}用户管理${NC}"
     echo -e "    ${BLUE}7.${NC} ${GREEN}端口转发管理${NC}"
     echo -e "    ${BLUE}8.${NC} ${GREEN}Argo 隧道管理${NC}"
@@ -1911,7 +2193,7 @@ _main_menu() {
       2) _system_tools_menu ;;
       3) _proto_menu ;;
       4) _relay_menu; _pause ;;
-      5) _warp_menu; _pause ;;
+      5) _route_menu ;;
       6) _user_menu ;;
       7) _port_forward_menu ;;
       8) _argo_menu ;;
@@ -1939,7 +2221,14 @@ _cli() {
     connlimit-list|conn-limit-list) _connlimit_list ;;
     connlimit-clear|conn-limit-clear) _connlimit_clear_rules ;;
     connlimit-persist|conn-limit-persist) _connlimit_persist ;;
-    warp) _warp_menu ;;
+    route|split|route-menu|split-menu|warp) _route_menu ;;
+    route-list|split-list) _route_list ;;
+    route-apply|split-apply) _route_apply ;;
+    route-clear|split-clear) _route_clear_state && _route_apply ;;
+    route-add|split-add) shift; _route_add_rule "$1" "$2" "$3" ;;
+    route-add-cidr|split-add-cidr) shift; _route_add_cidr "$1" "$2" ;;
+    route-delete|split-delete|route-del|split-del) shift; _route_delete "$1" ;;
+    route-final|split-final) shift; _route_set_final "$1" ;;
     proto|protocol) _proto_menu ;;
     create-protocol|add-protocol) _create_protocol_only ;;
     argo|tunnel|cloudflared) _argo_menu ;;
