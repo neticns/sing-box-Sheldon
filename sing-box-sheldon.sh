@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.15
+# Version: 1.2.16
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.15"
-SINGBOX_VERSION="1.13.12"
+SCRIPT_VERSION="1.2.16"
+SINGBOX_VERSION="1.13.13"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
 USER_FILE="$SINGBOX_DIR/users.json"
