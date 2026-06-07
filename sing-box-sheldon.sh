@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.17
+# Version: 1.2.19
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.18"
+SCRIPT_VERSION="1.2.19"
 SINGBOX_VERSION="1.13.13"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -16,6 +16,9 @@ SCRIPT_PATH="/usr/local/bin/sing-box-sheldon"
 SP_PATH="/usr/local/bin/sp"
 SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/neticns/sing-box-Sheldon/main/sing-box-sheldon.sh"
 PF_FILE="$SINGBOX_DIR/port_forward.rules"
+CONNLIMIT_FILE="$SINGBOX_DIR/connlimit.rules"
+CONNLIMIT_CHAIN="SING_BOX_SHELDON_CONNLIMIT"
+CONNLIMIT_COMMENT="sing-box-sheldon-connlimit"
 ARGO_DIR="$SINGBOX_DIR/argo"
 ARGO_BIN="/usr/local/bin/cloudflared"
 ARGO_SERVICE="cloudflared-sheldon"
@@ -149,6 +152,23 @@ _open_firewall_port() {
   local port="$1" proto="${2:-tcp}"
   if _has ufw; then ufw allow "${port}/${proto}" >/dev/null 2>&1 || true; fi
   if _has firewall-cmd; then firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi
+}
+
+_iptables_has_connlimit() {
+  _has iptables || return 1
+  iptables -m connlimit -h >/dev/null 2>&1 || return 1
+}
+
+_ip6tables_has_connlimit() {
+  _has ip6tables || return 1
+  ip6tables -m connlimit -h >/dev/null 2>&1 || return 1
+}
+
+_connlimit_proto_enforceable() {
+  case "$1" in
+    hysteria2|hy2|tuic) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 _port_in_use() {
@@ -595,6 +615,191 @@ _port_forward_menu() {
   done
 }
 
+_connlimit_refresh_state() {
+  _jq
+  mkdir -p "$SINGBOX_DIR"
+  [ -f "$USER_FILE" ] || echo '{"users":[]}' > "$USER_FILE"
+  local tmp="${CONNLIMIT_FILE}.tmp"
+  jq -r '
+    .users[]? |
+    (.connection_limit_count // 0) as $conn |
+    select($conn > 0) |
+    [
+      (.name // ""),
+      (.tag // ""),
+      (.port // 0),
+      (.protocol // ""),
+      ($conn | tostring)
+    ] | @tsv
+  ' "$USER_FILE" | while IFS=$'\t' read -r name tag port proto conn; do
+    [ -n "$name" ] || continue
+    [ "$port" -gt 0 ] 2>/dev/null || continue
+    case "$proto" in
+      hysteria2|hy2|tuic)
+        printf '#WARN|%s|%s|%s|%s|%s\n' "$conn" "$name" "$tag" "$proto" "$port"
+        ;;
+      *)
+        printf '%s|%s|%s|%s|%s\n' "$port" "$conn" "$name" "$tag" "$proto"
+        ;;
+    esac
+  done > "$tmp" && mv "$tmp" "$CONNLIMIT_FILE"
+}
+
+_connlimit_detach_input_cmd() {
+  local cmd="$1"
+  while "$cmd" -C INPUT -j "$CONNLIMIT_CHAIN" -m comment --comment "$CONNLIMIT_COMMENT" >/dev/null 2>&1; do
+    "$cmd" -D INPUT -j "$CONNLIMIT_CHAIN" -m comment --comment "$CONNLIMIT_COMMENT" >/dev/null 2>&1 || break
+  done
+}
+
+_connlimit_reset_chain_cmd() {
+  local cmd="$1"
+  "$cmd" -N "$CONNLIMIT_CHAIN" >/dev/null 2>&1 || true
+  "$cmd" -F "$CONNLIMIT_CHAIN" >/dev/null 2>&1 || true
+  _connlimit_detach_input_cmd "$cmd"
+}
+
+_connlimit_drop_empty_chain_cmd() {
+  local cmd="$1"
+  _connlimit_detach_input_cmd "$cmd"
+  "$cmd" -F "$CONNLIMIT_CHAIN" >/dev/null 2>&1 || true
+  "$cmd" -X "$CONNLIMIT_CHAIN" >/dev/null 2>&1 || true
+}
+
+_connlimit_apply_cmd() {
+  local cmd="$1" mask="$2" port conn name tag proto warn=0 applied=0
+  _connlimit_reset_chain_cmd "$cmd"
+  "$cmd" -I INPUT 1 -j "$CONNLIMIT_CHAIN" -m comment --comment "$CONNLIMIT_COMMENT"
+
+  while IFS='|' read -r port conn name tag proto _msg; do
+    [ -n "$port" ] || continue
+    if [ "$port" = "#WARN" ]; then
+      warn=1
+      continue
+    fi
+    [ "$port" -gt 0 ] 2>/dev/null || continue
+    [ "$conn" -gt 0 ] 2>/dev/null || continue
+    "$cmd" -A "$CONNLIMIT_CHAIN" -p tcp --syn --dport "$port" \
+      -m connlimit --connlimit-above "$conn" --connlimit-mask "$mask" \
+      -m comment --comment "${CONNLIMIT_COMMENT}:${port}:${conn}" -j REJECT --reject-with tcp-reset
+    applied=$((applied+1))
+  done < "$CONNLIMIT_FILE"
+
+  if [ "$applied" -eq 0 ]; then
+    _connlimit_drop_empty_chain_cmd "$cmd"
+  fi
+  echo "$applied|$warn"
+}
+
+_connlimit_apply() {
+  _need_root
+  mkdir -p "$SINGBOX_DIR"
+  _connlimit_refresh_state || return 1
+  _ensure_cmd iptables iptables iptables-nft || { _err "缺少 iptables"; return 1; }
+
+  local applied4=0 applied6=0 warn=0 out
+  if _iptables_has_connlimit; then
+    out="$(_connlimit_apply_cmd iptables 32)"
+    applied4="${out%%|*}"; warn="${out##*|}"
+  else
+    _warn "iptables connlimit 模块不可用；IPv4 连接数限制已保存但无法执行"
+  fi
+
+  if _ip6tables_has_connlimit; then
+    out="$(_connlimit_apply_cmd ip6tables 128)"
+    applied6="${out%%|*}"
+  elif _has ip6tables; then
+    _warn "ip6tables connlimit 模块不可用；IPv6 连接数限制已保存但无法执行"
+  fi
+
+  if [ "$applied4" -eq 0 ] 2>/dev/null && [ "$applied6" -eq 0 ] 2>/dev/null && ! _iptables_has_connlimit && ! _ip6tables_has_connlimit; then
+    _warn "连接数限制已保存，但当前防火墙 connlimit 能力不可用"
+  fi
+  [ "$warn" -eq 0 ] || _warn "UDP 连接数限制不能通过 TCP connlimit 执行"
+  _ok "连接数限制规则已应用: IPv4 ${applied4} 条，IPv6 ${applied6} 条 TCP 规则"
+}
+
+_connlimit_clear_rules() {
+  _need_root
+  local cleared=0
+  if _has iptables; then _connlimit_drop_empty_chain_cmd iptables; cleared=1; fi
+  if _has ip6tables; then _connlimit_drop_empty_chain_cmd ip6tables; cleared=1; fi
+  [ "$cleared" -eq 1 ] || { _ok "iptables/ip6tables 不存在，无需清理"; return 0; }
+  _ok "已清除连接数限制防火墙规则"
+}
+
+_connlimit_list() {
+  mkdir -p "$SINGBOX_DIR"
+  [ -f "$CONNLIMIT_FILE" ] || _connlimit_refresh_state >/dev/null 2>&1 || touch "$CONNLIMIT_FILE"
+  echo -e "${BLUE}--------------------------------------------------------------------------------${NC}"
+  printf "${GREEN}%-8s %-8s %-14s %-24s %-12s %-10s${NC}\n" "端口" "限制" "用户名" "标签" "协议" "状态"
+  echo -e "${BLUE}--------------------------------------------------------------------------------${NC}"
+  local port conn name tag proto msg any=0
+  while IFS='|' read -r port conn name tag proto msg; do
+    [ -n "$port" ] || continue
+    any=1
+    if [ "$port" = "#WARN" ]; then
+      printf "%-8s %-8s %-14s %-24s %-12s %-10s\n" "$tag" "$msg" "$conn" "$name" "$proto" "仅记录"
+    else
+      printf "%-8s %-8s %-14s %-24s %-12s %-10s\n" "$port" "$conn" "$name" "$tag" "$proto" "TCP"
+    fi
+  done < "$CONNLIMIT_FILE"
+  [ "$any" -eq 1 ] || echo "暂无连接数限制规则"
+  if _has iptables && iptables -L "$CONNLIMIT_CHAIN" -n >/dev/null 2>&1; then
+    echo
+    echo "IPv4 当前规则:"
+    iptables -L "$CONNLIMIT_CHAIN" -n -v --line-numbers
+  fi
+  if _has ip6tables && ip6tables -L "$CONNLIMIT_CHAIN" -n >/dev/null 2>&1; then
+    echo
+    echo "IPv6 当前规则:"
+    ip6tables -L "$CONNLIMIT_CHAIN" -n -v --line-numbers
+  fi
+}
+
+_connlimit_persist() {
+  _need_root
+  _ensure_cmd iptables iptables iptables-nft || return 1
+  cat >/etc/systemd/system/sing-box-sheldon-connlimit.service <<EOF
+[Unit]
+Description=sing-box Sheldon connection limit rules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_PATH connlimit-apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  if _has systemctl; then systemctl daemon-reload; systemctl enable sing-box-sheldon-connlimit >/dev/null 2>&1 || true; fi
+  _ok "已设置 systemd 开机自动应用连接数限制"
+}
+
+_connlimit_menu() {
+  while true; do
+    clear
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${BOLD}${WHITE}                    连接数限制防火墙规则${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    _connlimit_list
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "    ${BLUE}1.${NC} ${GREEN}从 users.json 应用规则${NC}"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}清除防火墙规则${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}设置开机自动应用${NC}"
+    echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
+    read -r -p "请选择操作: " c
+    case "$c" in
+      1) _connlimit_apply; _pause ;;
+      2) _connlimit_clear_rules; _pause ;;
+      3) _connlimit_persist; _pause ;;
+      0) break ;;
+    esac
+  done
+}
+
 _warp_menu() {
   echo -e "${CYAN}WARP 分流说明${NC}"
   echo "当前轻量版提供 WireGuard/WARP 配置占位和手动接入入口。"
@@ -959,7 +1164,11 @@ _apply_user_conn_limit_config() {
     .route.rules = ((.route.rules // []) | map(select((sheldon_connlimit_action | not) or (inbound_matches($tag) | not))))
   ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
   if [ "$conn_limit" != "0" ]; then
-    _warn "当前 sing-box 核心暂无可验证的通用客户端连接数限制；已保存连接数记录，但暂不强制执行"
+    if _connlimit_proto_enforceable "$proto"; then
+      _warn "sing-box 配置不会写入未知连接数字段；TCP 连接数限制将通过 iptables connlimit 执行"
+    else
+      _warn "该协议主要使用 UDP；TCP connlimit 无法强制执行 UDP 连接数限制，仅保存和展示记录"
+    fi
   fi
 }
 
@@ -1020,6 +1229,7 @@ _add_user() {
       _err "配置检查失败，已写入但未重启，请手动修正"; return
     fi
   fi
+  _connlimit_apply || true
   _service restart >/dev/null 2>&1 || true
   _ok "用户已添加"
   echo "协议: $proto"
@@ -1104,6 +1314,7 @@ _change_user_conn_limit() {
   if _check_config; then
     _service restart >/dev/null 2>&1 || true
     rm -f "$cfg_bak" "$user_bak"
+    _connlimit_apply || true
     _ok "已更新 $name 连接数限制: $(_conn_limit_display "$conn")"
   else
     cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"
@@ -1131,6 +1342,7 @@ _clear_user_conn_limit() {
   if _check_config; then
     _service restart >/dev/null 2>&1 || true
     rm -f "$cfg_bak" "$user_bak"
+    _connlimit_apply || true
     _ok "已清除 $name 连接数限制"
   else
     cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"
@@ -1175,6 +1387,7 @@ _delete_user() {
   tag=$(jq -r --arg name "$name" '.users[]? | select(.name==$name) | .tag' "$USER_FILE")
   [ -n "$tag" ] && [ "$tag" != "null" ] && _remove_inbound_tag "$tag"
   _del_user_record "$name"
+  _connlimit_apply || true
   _check_config && _service restart >/dev/null 2>&1 || true
   _ok "已删除 $name"
 }
@@ -1553,7 +1766,8 @@ _user_menu() {
     echo -e "    ${BLUE}5.${NC} ${GREEN}清除用户限速${NC}"
     echo -e "    ${BLUE}6.${NC} ${GREEN}修改用户连接数限制${NC}"
     echo -e "    ${BLUE}7.${NC} ${GREEN}清除用户连接数限制${NC}"
-    echo -e "    ${BLUE}8.${NC} ${GREEN}重启 sing-box${NC}"
+    echo -e "    ${BLUE}8.${NC} ${GREEN}连接数限制防火墙规则${NC}"
+    echo -e "    ${BLUE}9.${NC} ${GREEN}重启 sing-box${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
     echo
     read -r -p "请选择操作: " c
@@ -1565,7 +1779,8 @@ _user_menu() {
       5) _clear_user_limit; _pause ;;
       6) _change_user_conn_limit; _pause ;;
       7) _clear_user_conn_limit; _pause ;;
-      8) _service restart; _pause ;;
+      8) _connlimit_menu ;;
+      9) _service restart; _pause ;;
       0) break ;;
     esac
   done
@@ -1657,6 +1872,8 @@ _command_menu() {
         echo "sing-box-sheldon clear-user-limit   清除用户限速"
         echo "sing-box-sheldon limit-user-conn    修改用户连接数限制"
         echo "sing-box-sheldon clear-user-conn-limit 清除用户连接数限制"
+        echo "sing-box-sheldon connlimit-apply    应用连接数限制防火墙规则"
+        echo "sing-box-sheldon connlimit-list     查看连接数限制防火墙规则"
         _pause
         ;;
       0) break ;;
@@ -1717,6 +1934,11 @@ _cli() {
     relay) _relay_menu ;;
     port-forward|forward|pf) _port_forward_menu ;;
     port-forward-apply) _port_forward_apply ;;
+    connlimit|conn-limit|connlimit-menu) _connlimit_menu ;;
+    connlimit-apply|conn-limit-apply) _connlimit_apply ;;
+    connlimit-list|conn-limit-list) _connlimit_list ;;
+    connlimit-clear|conn-limit-clear) _connlimit_clear_rules ;;
+    connlimit-persist|conn-limit-persist) _connlimit_persist ;;
     warp) _warp_menu ;;
     proto|protocol) _proto_menu ;;
     create-protocol|add-protocol) _create_protocol_only ;;

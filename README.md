@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.13`
 >
-> 脚本版本：`v1.2.18`
+> 脚本版本：`v1.2.19`
 
 ## 功能特性
 
@@ -122,7 +122,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.18]
+        [sing-box Sheldon 管理系统 V1.2.19]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.13
 ------------------------------------------------------------
@@ -171,6 +171,8 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh clear-user-limit # 清除用户限速
 ./sing-box-sheldon.sh limit-user-conn # 修改用户连接数限制
 ./sing-box-sheldon.sh clear-user-conn-limit # 清除用户连接数限制
+./sing-box-sheldon.sh connlimit-apply # 应用连接数限制防火墙规则
+./sing-box-sheldon.sh connlimit-list # 查看连接数限制防火墙规则
 sp                            # 直接召唤脚本菜单
 ./sing-box-sheldon.sh sp           # 同样打开脚本菜单
 ```
@@ -197,12 +199,20 @@ sp
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
 ```
 
-## v1.2.18 用户连接数限制
+## v1.2.19 用户连接数限制
 
 - 新增用户时可输入客户端连接数限制，留空或 `0` 表示不限。
 - `users.json` 新增 `connection_limit_count` 数字字段，用于记录和列表展示。
-- 用户管理菜单新增 `修改用户连接数限制`、`清除用户连接数限制`，命令行支持 `limit-user-conn`、`clear-user-conn-limit`。
-- sing-box 1.13.x 当前常用入站暂无可验证的通用客户端连接数限制字段；脚本不会强写 `max_conn_client` / `max_connections` 等未知字段，避免配置检查失败。后续核心支持后可基于已保存字段迁移生效。
+- 用户管理菜单支持 `修改用户连接数限制`、`清除用户连接数限制` 和 `连接数限制防火墙规则`。
+- sing-box 1.13.x 当前常用入站暂无可验证的通用客户端连接数限制字段；脚本不会强写 `max_conn_client` / `max_connections` 等未知字段，避免配置检查失败。
+- TCP 入站会从 `users.json` 生成 `/usr/local/etc/sing-box/connlimit.rules`，并通过 iptables `connlimit` 模块在专用链 `SING_BOX_SHELDON_CONNLIMIT` 执行每来源连接数限制。
+- Hysteria2 / TUIC 等 UDP 协议会继续保存和展示连接数限制，但会提示 TCP connlimit 无法强制执行 UDP。
+- 支持 systemd oneshot 开机应用：`sing-box-sheldon connlimit-persist`。
+- 命令行支持 `limit-user-conn`、`clear-user-conn-limit`、`connlimit-apply`、`connlimit-list`、`connlimit-clear`。
+
+## v1.2.18 用户连接数限制记录
+
+- 首次加入连接数限制记录与用户列表展示能力。
 
 ## v1.2.17 用户限速
 
