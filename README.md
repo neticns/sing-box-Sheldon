@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.13`
 >
-> 脚本版本：`v1.2.16`
+> 脚本版本：`v1.2.17`
 
 ## 功能特性
 
@@ -13,6 +13,7 @@
   - 新增用户
   - 删除用户
   - 查看用户套餐、重置日、到期时间
+  - 设置 / 清除用户上传、下载限速
   - 导出节点链接
 - 协议管理
   - 查看支持协议/防封说明
@@ -120,7 +121,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.16]
+        [sing-box Sheldon 管理系统 V1.2.17]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.13
 ------------------------------------------------------------
@@ -165,6 +166,8 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh forward      # 端口转发管理
 ./sing-box-sheldon.sh argo        # Argo 隧道管理
 ./sing-box-sheldon.sh argo-status # 查看 Argo 状态
+./sing-box-sheldon.sh limit-user  # 修改用户限速
+./sing-box-sheldon.sh clear-user-limit # 清除用户限速
 sp                            # 直接召唤脚本菜单
 ./sing-box-sheldon.sh sp           # 同样打开脚本菜单
 ```
@@ -190,6 +193,13 @@ sp
 /usr/local/bin/sing-box-sheldon
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
 ```
+
+## v1.2.17 用户限速
+
+- 新增用户时可输入上传 / 下载限速 Mbps，留空或 `0` 表示不限。
+- `users.json` 新增 `upload_limit_mbps`、`download_limit_mbps` 数字字段。
+- Hysteria2 使用入站 `up_mbps` / `down_mbps`；其他协议会保存限速记录用于展示和后续迁移，但 sing-box 1.13.x 暂无通用入站限速 action，暂不强制执行。
+- 用户管理菜单新增 `修改用户限速`、`清除用户限速`，命令行支持 `limit-user`、`clear-user-limit`。
 
 ## v1.2.15 脚本更新提醒
 
@@ -510,6 +520,8 @@ sp
 - 套餐
 - 重置日
 - 到期时间
+- 上传限速 Mbps，留空或 `0` 为不限
+- 下载限速 Mbps，留空或 `0` 为不限
 
 支持协议输入：
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sing-box Sheldon 管理系统
 # 轻量、省内存、最新 sing-box 协议管理脚本
-# Version: 1.2.16
+# Version: 1.2.17
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.16"
+SCRIPT_VERSION="1.2.17"
 SINGBOX_VERSION="1.13.13"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -749,13 +749,49 @@ _core_version() { "$BIN_PATH" version 2>/dev/null | awk 'NR==1{print $3}'; }
 
 _jq() { _has jq || _pkg_install jq; }
 
+_normalize_mbps_limit() {
+  _jq
+  local v="$1"
+  v="${v:-0}"
+  [ -n "$v" ] || v=0
+  case "$v" in
+    *[!0-9]*) _err "限速必须是整数 Mbps，留空或 0 表示不限"; return 1 ;;
+  esac
+  jq -en --arg v "$v" '
+    ($v | tonumber) as $n |
+    if $n < 0 then halt_error(1)
+    elif $n == 0 then 0
+    else $n
+    end
+  ' 2>/dev/null || { _err "限速必须是整数 Mbps，留空或 0 表示不限"; return 1; }
+}
+
+_read_speed_limits() {
+  local up_in down_in
+  read -r -p "上传限速 Mbps [不限]: " up_in
+  LIMIT_UPLOAD_MBPS="$(_normalize_mbps_limit "$up_in")" || return 1
+  read -r -p "下载限速 Mbps [不限]: " down_in
+  LIMIT_DOWNLOAD_MBPS="$(_normalize_mbps_limit "$down_in")" || return 1
+}
+
+_limit_display() {
+  local up="$1" down="$2"
+  up="${up:-0}"; down="${down:-0}"
+  if [ "$up" = "0" ] && [ "$down" = "0" ]; then
+    echo "不限"
+  else
+    echo "${up}/${down}"
+  fi
+}
+
 _add_user_record() {
   _jq
   local name="$1" status="$2" plan="$3" reset="$4" expire="$5" port="$6" proto="$7" uuid="$8" pass="$9" tag="${10}"
   local reality_public="${11:-}" reality_short_id="${12:-}" reality_sni="${13:-}" reality_alpn="${14:-}"
+  local upload_limit="${15:-0}" download_limit="${16:-0}"
   local tmp="$USER_FILE.tmp"
-  jq --arg name "$name" --arg status "$status" --arg plan "$plan" --arg reset "$reset" --arg expire "$expire" --arg port "$port" --arg proto "$proto" --arg uuid "$uuid" --arg pass "$pass" --arg tag "$tag" --arg pbk "$reality_public" --arg sid "$reality_short_id" --arg sni "$reality_sni" --arg alpn "$reality_alpn" \
-    '.users += [{name:$name,status:$status,upload:0,download:0,correct:0,plan:$plan,reset:$reset,expire:$expire,port:($port|tonumber),protocol:$proto,uuid:$uuid,password:$pass,tag:$tag,reality_public_key:$pbk,reality_short_id:$sid,reality_server_name:$sni,reality_alpn:$alpn,created:now|todate}]' \
+  jq --arg name "$name" --arg status "$status" --arg plan "$plan" --arg reset "$reset" --arg expire "$expire" --arg port "$port" --arg proto "$proto" --arg uuid "$uuid" --arg pass "$pass" --arg tag "$tag" --arg pbk "$reality_public" --arg sid "$reality_short_id" --arg sni "$reality_sni" --arg alpn "$reality_alpn" --argjson up "$upload_limit" --argjson down "$download_limit" \
+    '.users += [{name:$name,status:$status,upload:0,download:0,correct:0,plan:$plan,reset:$reset,expire:$expire,port:($port|tonumber),protocol:$proto,uuid:$uuid,password:$pass,tag:$tag,upload_limit_mbps:$up,download_limit_mbps:$down,reality_public_key:$pbk,reality_short_id:$sid,reality_server_name:$sni,reality_alpn:$alpn,created:now|todate}]' \
     "$USER_FILE" > "$tmp" && mv "$tmp" "$USER_FILE"
 }
 
@@ -763,6 +799,14 @@ _del_user_record() {
   _jq
   local name="$1" tmp="$USER_FILE.tmp"
   jq --arg name "$name" '.users |= map(select(.name != $name))' "$USER_FILE" > "$tmp" && mv "$tmp" "$USER_FILE"
+}
+
+_set_user_limit_record() {
+  _jq
+  local name="$1" up="$2" down="$3" tmp="$USER_FILE.tmp"
+  jq --arg name "$name" --argjson up "$up" --argjson down "$down" \
+    '.users |= map(if .name == $name then .upload_limit_mbps = $up | .download_limit_mbps = $down else . end)' \
+    "$USER_FILE" > "$tmp" && mv "$tmp" "$USER_FILE"
 }
 
 
@@ -785,7 +829,7 @@ _ensure_tls_cert() {
 
 _add_inbound_json() {
   _jq
-  local proto="$1" tag="$2" port="$3" uuid="$4" pass="$5" tmp="$CONFIG_FILE.tmp" inbound
+  local proto="$1" tag="$2" port="$3" uuid="$4" pass="$5" upload_limit="${6:-0}" download_limit="${7:-0}" tmp="$CONFIG_FILE.tmp" inbound
   LAST_REALITY_PUBLIC=""; LAST_REALITY_SHORT_ID=""; LAST_REALITY_SNI=""; LAST_REALITY_ALPN=""
   case "$proto" in
     vless)
@@ -799,7 +843,7 @@ _add_inbound_json() {
     trojan)
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" '{type:"trojan",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pass}]}' ) ;;
     hysteria2|hy2)
-      inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" '{type:"hysteria2",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pass}],up_mbps:100,down_mbps:500}' ) ;;
+      inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg pass "$pass" --argjson up "$upload_limit" --argjson down "$download_limit" '{type:"hysteria2",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pass}],up_mbps:(if $up > 0 then $up else 100 end),down_mbps:(if $down > 0 then $down else 500 end)}' ) ;;
     tuic)
       inbound=$(jq -nc --arg tag "$tag" --argjson port "$port" --arg uuid "$uuid" --arg pass "$pass" '{type:"tuic",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,password:$pass}],congestion_control:"bbr"}' ) ;;
     shadowsocks|ss)
@@ -819,20 +863,67 @@ _add_inbound_json() {
   jq --argjson in "$inbound" '.inbounds += [$in]' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
 }
 
+_apply_user_speed_limit_config() {
+  _jq
+  local proto="$1" tag="$2" upload_limit="${3:-0}" download_limit="${4:-0}" tmp="$CONFIG_FILE.tmp"
+  case "$proto" in
+    hysteria2|hy2)
+      jq --arg tag "$tag" --argjson up "$upload_limit" --argjson down "$download_limit" '
+        def inbound_matches($tag):
+          if (.inbound? | type) == "array" then ((.inbound | index($tag)) != null)
+          elif (.inbound? | type) == "string" then (.inbound == $tag)
+          elif (.inbound_tag? | type) == "array" then ((.inbound_tag | index($tag)) != null)
+          elif (.inbound_tag? | type) == "string" then (.inbound_tag == $tag)
+          else false end;
+        def sheldon_limit_action: ((.action // "") == "limit") or ((if (.action? | type) == "object" then (.action.type // "") else "" end) == "limit");
+        .inbounds |= map(if .tag == $tag then .up_mbps = (if $up > 0 then $up else 100 end) | .down_mbps = (if $down > 0 then $down else 500 end) else . end) |
+        .route.rules = ((.route.rules // []) | map(select((sheldon_limit_action | not) or (inbound_matches($tag) | not))))
+      ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+      ;;
+    *)
+      # sing-box 1.13.x has no generic per-inbound bandwidth-limit route action.
+      # Keep user limits in users.json for display/future migration, and remove any stale
+      # experimental limit rules generated by older script revisions so config checks pass.
+      jq --arg tag "$tag" '
+        def inbound_matches($tag):
+          if (.inbound? | type) == "array" then ((.inbound | index($tag)) != null)
+          elif (.inbound? | type) == "string" then (.inbound == $tag)
+          elif (.inbound_tag? | type) == "array" then ((.inbound_tag | index($tag)) != null)
+          elif (.inbound_tag? | type) == "string" then (.inbound_tag == $tag)
+          else false end;
+        def sheldon_limit_action: ((.action // "") == "limit") or ((if (.action? | type) == "object" then (.action.type // "") else "" end) == "limit");
+        .route.rules = ((.route.rules // []) | map(select((sheldon_limit_action | not) or (inbound_matches($tag) | not))))
+      ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+      if [ "$upload_limit" != "0" ] || [ "$download_limit" != "0" ]; then
+        _warn "当前 sing-box 核心仅 Hysteria2 支持入站限速；已保存限速记录，但此协议暂不强制执行"
+      fi
+      ;;
+  esac
+}
+
 _remove_inbound_tag() {
   _jq
   local tag="$1" tmp="$CONFIG_FILE.tmp"
-  jq --arg tag "$tag" '.inbounds |= map(select(.tag != $tag)) | .route.rules |= map(select((.inbound // "") != $tag and ((.inbound_tag // []) | index($tag) | not)))' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  jq --arg tag "$tag" '
+    def inbound_matches($tag):
+      if (.inbound? | type) == "array" then ((.inbound | index($tag)) != null)
+      elif (.inbound? | type) == "string" then (.inbound == $tag)
+      elif (.inbound_tag? | type) == "array" then ((.inbound_tag | index($tag)) != null)
+      elif (.inbound_tag? | type) == "string" then (.inbound_tag == $tag)
+      else false end;
+    .inbounds |= map(select(.tag != $tag)) |
+    .route.rules = ((.route.rules // []) | map(select(inbound_matches($tag) | not)))
+  ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
 }
 
 _table_users() {
   _jq
-  printf "${BLUE}-----------------------------------------------------------------------------------------------${NC}\n"
-  printf "${GREEN}%-14s %-8s %-10s %-10s %-10s %-10s %-10s %-8s %-12s${NC}\n" "用户名" "状态" "上传流量" "下载流量" "补正流量" "已用总量" "套餐" "重置日" "到期时间"
-  printf "${BLUE}-----------------------------------------------------------------------------------------------${NC}\n"
-  jq -r '.users[]? | [.name,.status,((.upload/1048576)|tostring+" MB"),((.download/1048576)|tostring+" MB"),((.correct/1048576)|tostring+" MB"),(((.upload+.download+.correct)/1048576)|tostring+" MB"),.plan,.reset,.expire] | @tsv' "$USER_FILE" | \
-  while IFS=$'\t' read -r a b c d e f g h i; do
-    printf "%-14s %-8s %-10s %-10s %-10s %-10s %-10s %-8s %-12s\n" "$a" "$b" "$c" "$d" "$e" "$f" "$g" "$h" "$i"
+  printf "${BLUE}--------------------------------------------------------------------------------------------------------------------${NC}\n"
+  printf "${GREEN}%-14s %-8s %-10s %-10s %-10s %-10s %-10s %-10s %-8s %-12s${NC}\n" "用户名" "状态" "上传流量" "下载流量" "补正流量" "已用总量" "限速" "套餐" "重置日" "到期时间"
+  printf "${BLUE}--------------------------------------------------------------------------------------------------------------------${NC}\n"
+  jq -r '.users[]? | (.upload_limit_mbps // 0) as $up | (.download_limit_mbps // 0) as $down | [.name,.status,((.upload/1048576)|tostring+" MB"),((.download/1048576)|tostring+" MB"),((.correct/1048576)|tostring+" MB"),(((.upload+.download+.correct)/1048576)|tostring+" MB"),(if $up == 0 and $down == 0 then "不限" else (($up|tostring)+"/"+($down|tostring)) end),.plan,.reset,.expire] | @tsv' "$USER_FILE" | \
+  while IFS=$'\t' read -r a b c d e f g h i j; do
+    printf "%-14s %-8s %-10s %-10s %-10s %-10s %-10s %-10s %-8s %-12s\n" "$a" "$b" "$c" "$d" "$e" "$f" "$g" "$h" "$i" "$j"
   done
 }
 
@@ -847,19 +938,86 @@ _add_user() {
   read -r -p "套餐 [不限]: " plan; plan="${plan:-不限}"
   read -r -p "重置日 [不重置]: " reset; reset="${reset:-不重置}"
   read -r -p "到期时间 [永久]: " expire; expire="${expire:-永久}"
+  _read_speed_limits || return
   local uuid pass tag
   uuid="$(_generate_uuid)"; pass="$(_rand_pass)"; tag="user-$name"
-  _add_inbound_json "$proto" "$tag" "$port" "$uuid" "$pass" || return
-  _add_user_record "$name" "开启" "$plan" "$reset" "$expire" "$port" "$proto" "$uuid" "$pass" "$tag" "$LAST_REALITY_PUBLIC" "$LAST_REALITY_SHORT_ID" "$LAST_REALITY_SNI" "$LAST_REALITY_ALPN"
+  _add_inbound_json "$proto" "$tag" "$port" "$uuid" "$pass" "$LIMIT_UPLOAD_MBPS" "$LIMIT_DOWNLOAD_MBPS" || return
+  case "$proto" in hysteria2|hy2) ;; *) _apply_user_speed_limit_config "$proto" "$tag" "$LIMIT_UPLOAD_MBPS" "$LIMIT_DOWNLOAD_MBPS" || return ;; esac
+  _add_user_record "$name" "开启" "$plan" "$reset" "$expire" "$port" "$proto" "$uuid" "$pass" "$tag" "$LAST_REALITY_PUBLIC" "$LAST_REALITY_SHORT_ID" "$LAST_REALITY_SNI" "$LAST_REALITY_ALPN" "$LIMIT_UPLOAD_MBPS" "$LIMIT_DOWNLOAD_MBPS"
   _open_firewall_port "$port" tcp
   case "$proto" in hysteria2|hy2|tuic) _open_firewall_port "$port" udp ;; esac
-  _check_config || { _err "配置检查失败，已写入但未重启，请手动修正"; return; }
+  if ! _check_config; then
+    if [ "$LIMIT_UPLOAD_MBPS" != "0" ] || [ "$LIMIT_DOWNLOAD_MBPS" != "0" ]; then
+      _warn "当前 sing-box 核心不接受该协议的 route limit 语法，已移除限速规则并保留用户为不限速"
+      _apply_user_speed_limit_config "$proto" "$tag" 0 0 || true
+      _set_user_limit_record "$name" 0 0 || true
+      _check_config || { _err "配置检查失败，已写入但未重启，请手动修正"; return; }
+    else
+      _err "配置检查失败，已写入但未重启，请手动修正"; return
+    fi
+  fi
   _service restart >/dev/null 2>&1 || true
   _ok "用户已添加"
   echo "协议: $proto"
   echo "端口: $port"
   echo "UUID: $uuid"
   echo "密码: $pass"
+}
+
+_change_user_limit() {
+  _init_dirs
+  _table_users
+  read -r -p "用户名: " name
+  [ -n "$name" ] || return
+  local row proto tag up down cfg_bak user_bak
+  row=$(jq -c --arg name "$name" '.users[]? | select(.name==$name)' "$USER_FILE")
+  [ -n "$row" ] || { _err "用户不存在"; return; }
+  proto=$(echo "$row" | jq -r '.protocol')
+  tag=$(echo "$row" | jq -r '.tag')
+  _read_speed_limits || return
+  up="$LIMIT_UPLOAD_MBPS"; down="$LIMIT_DOWNLOAD_MBPS"
+  cfg_bak="$(mktemp /tmp/sing-box-config.XXXXXX)" || return
+  user_bak="$(mktemp /tmp/sing-box-users.XXXXXX)" || { rm -f "$cfg_bak"; return; }
+  cp "$CONFIG_FILE" "$cfg_bak"; cp "$USER_FILE" "$user_bak"
+  _set_user_limit_record "$name" "$up" "$down" || { rm -f "$cfg_bak" "$user_bak"; return; }
+  _apply_user_speed_limit_config "$proto" "$tag" "$up" "$down" || { cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"; rm -f "$cfg_bak" "$user_bak"; return; }
+  if _check_config; then
+    _service restart >/dev/null 2>&1 || true
+    rm -f "$cfg_bak" "$user_bak"
+    _ok "已更新 $name 限速: $(_limit_display "$up" "$down")"
+  else
+    cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"
+    rm -f "$cfg_bak" "$user_bak"
+    _err "配置检查失败，已回滚限速修改"
+    return 1
+  fi
+}
+
+_clear_user_limit() {
+  _init_dirs
+  _table_users
+  read -r -p "用户名: " name
+  [ -n "$name" ] || return
+  local row proto tag cfg_bak user_bak
+  row=$(jq -c --arg name "$name" '.users[]? | select(.name==$name)' "$USER_FILE")
+  [ -n "$row" ] || { _err "用户不存在"; return; }
+  proto=$(echo "$row" | jq -r '.protocol')
+  tag=$(echo "$row" | jq -r '.tag')
+  cfg_bak="$(mktemp /tmp/sing-box-config.XXXXXX)" || return
+  user_bak="$(mktemp /tmp/sing-box-users.XXXXXX)" || { rm -f "$cfg_bak"; return; }
+  cp "$CONFIG_FILE" "$cfg_bak"; cp "$USER_FILE" "$user_bak"
+  _set_user_limit_record "$name" 0 0 || { rm -f "$cfg_bak" "$user_bak"; return; }
+  _apply_user_speed_limit_config "$proto" "$tag" 0 0 || { cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"; rm -f "$cfg_bak" "$user_bak"; return; }
+  if _check_config; then
+    _service restart >/dev/null 2>&1 || true
+    rm -f "$cfg_bak" "$user_bak"
+    _ok "已清除 $name 限速"
+  else
+    cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"
+    rm -f "$cfg_bak" "$user_bak"
+    _err "配置检查失败，已回滚清除限速"
+    return 1
+  fi
 }
 
 _create_protocol_only() {
@@ -1271,7 +1429,9 @@ _user_menu() {
     echo -e "    ${BLUE}1.${NC} ${GREEN}新增用户${NC}"
     echo -e "    ${BLUE}2.${NC} ${GREEN}导出节点配置${NC}"
     echo -e "    ${BLUE}3.${NC} ${GREEN}删除用户${NC}"
-    echo -e "    ${BLUE}4.${NC} ${GREEN}重启 sing-box${NC}"
+    echo -e "    ${BLUE}4.${NC} ${GREEN}修改用户限速${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}清除用户限速${NC}"
+    echo -e "    ${BLUE}6.${NC} ${GREEN}重启 sing-box${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
     echo
     read -r -p "请选择操作: " c
@@ -1279,7 +1439,9 @@ _user_menu() {
       1) _add_user; _pause ;;
       2) _export_user; _pause ;;
       3) _delete_user; _pause ;;
-      4) _service restart; _pause ;;
+      4) _change_user_limit; _pause ;;
+      5) _clear_user_limit; _pause ;;
+      6) _service restart; _pause ;;
       0) break ;;
     esac
   done
@@ -1367,6 +1529,8 @@ _command_menu() {
         echo "sing-box-sheldon status             查看服务状态"
         echo "sing-box-sheldon argo               Argo 隧道管理"
         echo "sing-box-sheldon argo-status        查看 Argo 状态"
+        echo "sing-box-sheldon limit-user         修改用户限速"
+        echo "sing-box-sheldon clear-user-limit   清除用户限速"
         _pause
         ;;
       0) break ;;
@@ -1448,6 +1612,8 @@ _cli() {
     cmd|commands|help|-h|--help) _command_menu ;;
     add-user) shift; _add_user ;;
     export-user) shift; _export_user ;;
+    limit-user|user-limit) shift; _change_user_limit ;;
+    clear-user-limit|clear-limit) shift; _clear_user_limit ;;
     *) _main_menu ;;
   esac
 }
