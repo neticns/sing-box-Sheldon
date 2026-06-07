@@ -4,7 +4,7 @@
 
 > 当前核心版本：`sing-box v1.13.13`
 >
-> 脚本版本：`v1.2.17`
+> 脚本版本：`v1.2.18`
 
 ## 功能特性
 
@@ -14,6 +14,7 @@
   - 删除用户
   - 查看用户套餐、重置日、到期时间
   - 设置 / 清除用户上传、下载限速
+  - 设置 / 清除用户客户端连接数限制
   - 导出节点链接
 - 协议管理
   - 查看支持协议/防封说明
@@ -121,7 +122,7 @@ sudo ./sing-box-sheldon.sh
 
 ```text
 ------------------------------------------------------------
-        [sing-box Sheldon 管理系统 V1.2.17]
+        [sing-box Sheldon 管理系统 V1.2.18]
 ------------------------------------------------------------
  sing-box : 运行中   版本 1.13.13
 ------------------------------------------------------------
@@ -168,6 +169,8 @@ sudo ./sing-box-sheldon.sh
 ./sing-box-sheldon.sh argo-status # 查看 Argo 状态
 ./sing-box-sheldon.sh limit-user  # 修改用户限速
 ./sing-box-sheldon.sh clear-user-limit # 清除用户限速
+./sing-box-sheldon.sh limit-user-conn # 修改用户连接数限制
+./sing-box-sheldon.sh clear-user-conn-limit # 清除用户连接数限制
 sp                            # 直接召唤脚本菜单
 ./sing-box-sheldon.sh sp           # 同样打开脚本菜单
 ```
@@ -193,6 +196,13 @@ sp
 /usr/local/bin/sing-box-sheldon
 /usr/local/bin/sp -> /usr/local/bin/sing-box-sheldon
 ```
+
+## v1.2.18 用户连接数限制
+
+- 新增用户时可输入客户端连接数限制，留空或 `0` 表示不限。
+- `users.json` 新增 `connection_limit_count` 数字字段，用于记录和列表展示。
+- 用户管理菜单新增 `修改用户连接数限制`、`清除用户连接数限制`，命令行支持 `limit-user-conn`、`clear-user-conn-limit`。
+- sing-box 1.13.x 当前常用入站暂无可验证的通用客户端连接数限制字段；脚本不会强写 `max_conn_client` / `max_connections` 等未知字段，避免配置检查失败。后续核心支持后可基于已保存字段迁移生效。
 
 ## v1.2.17 用户限速
 

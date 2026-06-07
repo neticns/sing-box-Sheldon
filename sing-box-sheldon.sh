@@ -5,7 +5,7 @@
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.17"
+SCRIPT_VERSION="1.2.18"
 SINGBOX_VERSION="1.13.13"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -774,6 +774,29 @@ _read_speed_limits() {
   LIMIT_DOWNLOAD_MBPS="$(_normalize_mbps_limit "$down_in")" || return 1
 }
 
+_normalize_conn_limit() {
+  _jq
+  local v="$1"
+  v="${v:-0}"
+  [ -n "$v" ] || v=0
+  case "$v" in
+    *[!0-9]*) _err "连接数限制必须是整数，留空或 0 表示不限"; return 1 ;;
+  esac
+  jq -en --arg v "$v" '
+    ($v | tonumber) as $n |
+    if $n < 0 then halt_error(1)
+    elif $n == 0 then 0
+    else $n
+    end
+  ' 2>/dev/null || { _err "连接数限制必须是整数，留空或 0 表示不限"; return 1; }
+}
+
+_read_conn_limit() {
+  local conn_in
+  read -r -p "客户端连接数限制 [不限]: " conn_in
+  LIMIT_CONN_COUNT="$(_normalize_conn_limit "$conn_in")" || return 1
+}
+
 _limit_display() {
   local up="$1" down="$2"
   up="${up:-0}"; down="${down:-0}"
@@ -784,14 +807,19 @@ _limit_display() {
   fi
 }
 
+_conn_limit_display() {
+  local conn="${1:-0}"
+  if [ "$conn" = "0" ]; then echo "不限"; else echo "$conn"; fi
+}
+
 _add_user_record() {
   _jq
   local name="$1" status="$2" plan="$3" reset="$4" expire="$5" port="$6" proto="$7" uuid="$8" pass="$9" tag="${10}"
   local reality_public="${11:-}" reality_short_id="${12:-}" reality_sni="${13:-}" reality_alpn="${14:-}"
-  local upload_limit="${15:-0}" download_limit="${16:-0}"
+  local upload_limit="${15:-0}" download_limit="${16:-0}" conn_limit="${17:-0}"
   local tmp="$USER_FILE.tmp"
-  jq --arg name "$name" --arg status "$status" --arg plan "$plan" --arg reset "$reset" --arg expire "$expire" --arg port "$port" --arg proto "$proto" --arg uuid "$uuid" --arg pass "$pass" --arg tag "$tag" --arg pbk "$reality_public" --arg sid "$reality_short_id" --arg sni "$reality_sni" --arg alpn "$reality_alpn" --argjson up "$upload_limit" --argjson down "$download_limit" \
-    '.users += [{name:$name,status:$status,upload:0,download:0,correct:0,plan:$plan,reset:$reset,expire:$expire,port:($port|tonumber),protocol:$proto,uuid:$uuid,password:$pass,tag:$tag,upload_limit_mbps:$up,download_limit_mbps:$down,reality_public_key:$pbk,reality_short_id:$sid,reality_server_name:$sni,reality_alpn:$alpn,created:now|todate}]' \
+  jq --arg name "$name" --arg status "$status" --arg plan "$plan" --arg reset "$reset" --arg expire "$expire" --arg port "$port" --arg proto "$proto" --arg uuid "$uuid" --arg pass "$pass" --arg tag "$tag" --arg pbk "$reality_public" --arg sid "$reality_short_id" --arg sni "$reality_sni" --arg alpn "$reality_alpn" --argjson up "$upload_limit" --argjson down "$download_limit" --argjson conn "$conn_limit" \
+    '.users += [{name:$name,status:$status,upload:0,download:0,correct:0,plan:$plan,reset:$reset,expire:$expire,port:($port|tonumber),protocol:$proto,uuid:$uuid,password:$pass,tag:$tag,upload_limit_mbps:$up,download_limit_mbps:$down,connection_limit_count:$conn,reality_public_key:$pbk,reality_short_id:$sid,reality_server_name:$sni,reality_alpn:$alpn,created:now|todate}]' \
     "$USER_FILE" > "$tmp" && mv "$tmp" "$USER_FILE"
 }
 
@@ -806,6 +834,14 @@ _set_user_limit_record() {
   local name="$1" up="$2" down="$3" tmp="$USER_FILE.tmp"
   jq --arg name "$name" --argjson up "$up" --argjson down "$down" \
     '.users |= map(if .name == $name then .upload_limit_mbps = $up | .download_limit_mbps = $down else . end)' \
+    "$USER_FILE" > "$tmp" && mv "$tmp" "$USER_FILE"
+}
+
+_set_user_conn_limit_record() {
+  _jq
+  local name="$1" conn="$2" tmp="$USER_FILE.tmp"
+  jq --arg name "$name" --argjson conn "$conn" \
+    '.users |= map(if .name == $name then .connection_limit_count = $conn else . end)' \
     "$USER_FILE" > "$tmp" && mv "$tmp" "$USER_FILE"
 }
 
@@ -901,6 +937,32 @@ _apply_user_speed_limit_config() {
   esac
 }
 
+_apply_user_conn_limit_config() {
+  _jq
+  local proto="$1" tag="$2" conn_limit="${3:-0}" tmp="$CONFIG_FILE.tmp"
+  # sing-box 1.13.x 当前常用入站没有已验证的通用客户端连接数限制字段。
+  # max_conn_client 属于旧 hysteria 入站，不适用于本脚本使用的 hysteria2。
+  # 因此只清理可能残留的实验字段/规则，连接数限制保存在 users.json 用于展示和后续迁移。
+  jq --arg tag "$tag" '
+    def inbound_matches($tag):
+      if (.inbound? | type) == "array" then ((.inbound | index($tag)) != null)
+      elif (.inbound? | type) == "string" then (.inbound == $tag)
+      elif (.inbound_tag? | type) == "array" then ((.inbound_tag | index($tag)) != null)
+      elif (.inbound_tag? | type) == "string" then (.inbound_tag == $tag)
+      else false end;
+    def sheldon_connlimit_action:
+      ((.action // "") == "connlimit") or
+      ((.action // "") == "connection_limit") or
+      ((if (.action? | type) == "object" then (.action.type // "") else "" end) == "connlimit") or
+      ((if (.action? | type) == "object" then (.action.type // "") else "" end) == "connection_limit");
+    .inbounds |= map(if .tag == $tag then del(.max_conn_client, .max_connections, .connection_limit, .connection_limit_count) else . end) |
+    .route.rules = ((.route.rules // []) | map(select((sheldon_connlimit_action | not) or (inbound_matches($tag) | not))))
+  ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  if [ "$conn_limit" != "0" ]; then
+    _warn "当前 sing-box 核心暂无可验证的通用客户端连接数限制；已保存连接数记录，但暂不强制执行"
+  fi
+}
+
 _remove_inbound_tag() {
   _jq
   local tag="$1" tmp="$CONFIG_FILE.tmp"
@@ -918,12 +980,12 @@ _remove_inbound_tag() {
 
 _table_users() {
   _jq
-  printf "${BLUE}--------------------------------------------------------------------------------------------------------------------${NC}\n"
-  printf "${GREEN}%-14s %-8s %-10s %-10s %-10s %-10s %-10s %-10s %-8s %-12s${NC}\n" "用户名" "状态" "上传流量" "下载流量" "补正流量" "已用总量" "限速" "套餐" "重置日" "到期时间"
-  printf "${BLUE}--------------------------------------------------------------------------------------------------------------------${NC}\n"
-  jq -r '.users[]? | (.upload_limit_mbps // 0) as $up | (.download_limit_mbps // 0) as $down | [.name,.status,((.upload/1048576)|tostring+" MB"),((.download/1048576)|tostring+" MB"),((.correct/1048576)|tostring+" MB"),(((.upload+.download+.correct)/1048576)|tostring+" MB"),(if $up == 0 and $down == 0 then "不限" else (($up|tostring)+"/"+($down|tostring)) end),.plan,.reset,.expire] | @tsv' "$USER_FILE" | \
-  while IFS=$'\t' read -r a b c d e f g h i j; do
-    printf "%-14s %-8s %-10s %-10s %-10s %-10s %-10s %-10s %-8s %-12s\n" "$a" "$b" "$c" "$d" "$e" "$f" "$g" "$h" "$i" "$j"
+  printf "${BLUE}------------------------------------------------------------------------------------------------------------------------------${NC}\n"
+  printf "${GREEN}%-14s %-8s %-10s %-10s %-10s %-10s %-10s %-8s %-10s %-8s %-12s${NC}\n" "用户名" "状态" "上传流量" "下载流量" "补正流量" "已用总量" "限速" "连接数" "套餐" "重置日" "到期时间"
+  printf "${BLUE}------------------------------------------------------------------------------------------------------------------------------${NC}\n"
+  jq -r '.users[]? | (.upload_limit_mbps // 0) as $up | (.download_limit_mbps // 0) as $down | (.connection_limit_count // 0) as $conn | [.name,.status,((.upload/1048576)|tostring+" MB"),((.download/1048576)|tostring+" MB"),((.correct/1048576)|tostring+" MB"),(((.upload+.download+.correct)/1048576)|tostring+" MB"),(if $up == 0 and $down == 0 then "不限" else (($up|tostring)+"/"+($down|tostring)) end),(if $conn == 0 then "不限" else ($conn|tostring) end),.plan,.reset,.expire] | @tsv' "$USER_FILE" | \
+  while IFS=$'\t' read -r a b c d e f g h i j k; do
+    printf "%-14s %-8s %-10s %-10s %-10s %-10s %-10s %-8s %-10s %-8s %-12s\n" "$a" "$b" "$c" "$d" "$e" "$f" "$g" "$h" "$i" "$j" "$k"
   done
 }
 
@@ -939,11 +1001,13 @@ _add_user() {
   read -r -p "重置日 [不重置]: " reset; reset="${reset:-不重置}"
   read -r -p "到期时间 [永久]: " expire; expire="${expire:-永久}"
   _read_speed_limits || return
+  _read_conn_limit || return
   local uuid pass tag
   uuid="$(_generate_uuid)"; pass="$(_rand_pass)"; tag="user-$name"
   _add_inbound_json "$proto" "$tag" "$port" "$uuid" "$pass" "$LIMIT_UPLOAD_MBPS" "$LIMIT_DOWNLOAD_MBPS" || return
   case "$proto" in hysteria2|hy2) ;; *) _apply_user_speed_limit_config "$proto" "$tag" "$LIMIT_UPLOAD_MBPS" "$LIMIT_DOWNLOAD_MBPS" || return ;; esac
-  _add_user_record "$name" "开启" "$plan" "$reset" "$expire" "$port" "$proto" "$uuid" "$pass" "$tag" "$LAST_REALITY_PUBLIC" "$LAST_REALITY_SHORT_ID" "$LAST_REALITY_SNI" "$LAST_REALITY_ALPN" "$LIMIT_UPLOAD_MBPS" "$LIMIT_DOWNLOAD_MBPS"
+  _apply_user_conn_limit_config "$proto" "$tag" "$LIMIT_CONN_COUNT" || return
+  _add_user_record "$name" "开启" "$plan" "$reset" "$expire" "$port" "$proto" "$uuid" "$pass" "$tag" "$LAST_REALITY_PUBLIC" "$LAST_REALITY_SHORT_ID" "$LAST_REALITY_SNI" "$LAST_REALITY_ALPN" "$LIMIT_UPLOAD_MBPS" "$LIMIT_DOWNLOAD_MBPS" "$LIMIT_CONN_COUNT"
   _open_firewall_port "$port" tcp
   case "$proto" in hysteria2|hy2|tuic) _open_firewall_port "$port" udp ;; esac
   if ! _check_config; then
@@ -1016,6 +1080,62 @@ _clear_user_limit() {
     cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"
     rm -f "$cfg_bak" "$user_bak"
     _err "配置检查失败，已回滚清除限速"
+    return 1
+  fi
+}
+
+_change_user_conn_limit() {
+  _init_dirs
+  _table_users
+  read -r -p "用户名: " name
+  [ -n "$name" ] || return
+  local row proto tag conn cfg_bak user_bak
+  row=$(jq -c --arg name "$name" '.users[]? | select(.name==$name)' "$USER_FILE")
+  [ -n "$row" ] || { _err "用户不存在"; return; }
+  proto=$(echo "$row" | jq -r '.protocol')
+  tag=$(echo "$row" | jq -r '.tag')
+  _read_conn_limit || return
+  conn="$LIMIT_CONN_COUNT"
+  cfg_bak="$(mktemp /tmp/sing-box-config.XXXXXX)" || return
+  user_bak="$(mktemp /tmp/sing-box-users.XXXXXX)" || { rm -f "$cfg_bak"; return; }
+  cp "$CONFIG_FILE" "$cfg_bak"; cp "$USER_FILE" "$user_bak"
+  _set_user_conn_limit_record "$name" "$conn" || { rm -f "$cfg_bak" "$user_bak"; return; }
+  _apply_user_conn_limit_config "$proto" "$tag" "$conn" || { cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"; rm -f "$cfg_bak" "$user_bak"; return; }
+  if _check_config; then
+    _service restart >/dev/null 2>&1 || true
+    rm -f "$cfg_bak" "$user_bak"
+    _ok "已更新 $name 连接数限制: $(_conn_limit_display "$conn")"
+  else
+    cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"
+    rm -f "$cfg_bak" "$user_bak"
+    _err "配置检查失败，已回滚连接数限制修改"
+    return 1
+  fi
+}
+
+_clear_user_conn_limit() {
+  _init_dirs
+  _table_users
+  read -r -p "用户名: " name
+  [ -n "$name" ] || return
+  local row proto tag cfg_bak user_bak
+  row=$(jq -c --arg name "$name" '.users[]? | select(.name==$name)' "$USER_FILE")
+  [ -n "$row" ] || { _err "用户不存在"; return; }
+  proto=$(echo "$row" | jq -r '.protocol')
+  tag=$(echo "$row" | jq -r '.tag')
+  cfg_bak="$(mktemp /tmp/sing-box-config.XXXXXX)" || return
+  user_bak="$(mktemp /tmp/sing-box-users.XXXXXX)" || { rm -f "$cfg_bak"; return; }
+  cp "$CONFIG_FILE" "$cfg_bak"; cp "$USER_FILE" "$user_bak"
+  _set_user_conn_limit_record "$name" 0 || { rm -f "$cfg_bak" "$user_bak"; return; }
+  _apply_user_conn_limit_config "$proto" "$tag" 0 || { cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"; rm -f "$cfg_bak" "$user_bak"; return; }
+  if _check_config; then
+    _service restart >/dev/null 2>&1 || true
+    rm -f "$cfg_bak" "$user_bak"
+    _ok "已清除 $name 连接数限制"
+  else
+    cp "$cfg_bak" "$CONFIG_FILE"; cp "$user_bak" "$USER_FILE"
+    rm -f "$cfg_bak" "$user_bak"
+    _err "配置检查失败，已回滚清除连接数限制"
     return 1
   fi
 }
@@ -1431,7 +1551,9 @@ _user_menu() {
     echo -e "    ${BLUE}3.${NC} ${GREEN}删除用户${NC}"
     echo -e "    ${BLUE}4.${NC} ${GREEN}修改用户限速${NC}"
     echo -e "    ${BLUE}5.${NC} ${GREEN}清除用户限速${NC}"
-    echo -e "    ${BLUE}6.${NC} ${GREEN}重启 sing-box${NC}"
+    echo -e "    ${BLUE}6.${NC} ${GREEN}修改用户连接数限制${NC}"
+    echo -e "    ${BLUE}7.${NC} ${GREEN}清除用户连接数限制${NC}"
+    echo -e "    ${BLUE}8.${NC} ${GREEN}重启 sing-box${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
     echo
     read -r -p "请选择操作: " c
@@ -1441,7 +1563,9 @@ _user_menu() {
       3) _delete_user; _pause ;;
       4) _change_user_limit; _pause ;;
       5) _clear_user_limit; _pause ;;
-      6) _service restart; _pause ;;
+      6) _change_user_conn_limit; _pause ;;
+      7) _clear_user_conn_limit; _pause ;;
+      8) _service restart; _pause ;;
       0) break ;;
     esac
   done
@@ -1531,6 +1655,8 @@ _command_menu() {
         echo "sing-box-sheldon argo-status        查看 Argo 状态"
         echo "sing-box-sheldon limit-user         修改用户限速"
         echo "sing-box-sheldon clear-user-limit   清除用户限速"
+        echo "sing-box-sheldon limit-user-conn    修改用户连接数限制"
+        echo "sing-box-sheldon clear-user-conn-limit 清除用户连接数限制"
         _pause
         ;;
       0) break ;;
@@ -1614,6 +1740,8 @@ _cli() {
     export-user) shift; _export_user ;;
     limit-user|user-limit) shift; _change_user_limit ;;
     clear-user-limit|clear-limit) shift; _clear_user_limit ;;
+    limit-user-conn|user-conn-limit|conn-limit-user) shift; _change_user_conn_limit ;;
+    clear-user-conn-limit|clear-conn-limit) shift; _clear_user_conn_limit ;;
     *) _main_menu ;;
   esac
 }
