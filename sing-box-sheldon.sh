@@ -5,7 +5,7 @@
 
 set -o pipefail
 
-SCRIPT_VERSION="1.2.20"
+SCRIPT_VERSION="1.3.0"
 SINGBOX_VERSION="1.13.13"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
@@ -23,9 +23,8 @@ CONNLIMIT_CHAIN="SING_BOX_SHELDON_CONNLIMIT"
 CONNLIMIT_COMMENT="sing-box-sheldon-connlimit"
 ARGO_DIR="$SINGBOX_DIR/argo"
 ARGO_BIN="/usr/local/bin/cloudflared"
-ARGO_SERVICE="cloudflared-sheldon"
-ARGO_CONFIG="$ARGO_DIR/config.yml"
-ARGO_INFO="$ARGO_DIR/tunnel.info"
+ARGO_TUNNELS="$ARGO_DIR/tunnels.json"
+ARGO_HEALTH_LOG="$ARGO_DIR/health.log"
 SCRIPT_UPDATE_CACHE="/tmp/sing-box-sheldon-update.cache"
 SCRIPT_UPDATE_CACHE_TTL=21600
 
@@ -1805,7 +1804,6 @@ _logs() {
 }
 
 
-
 _argo_arch() {
   case "$(uname -m)" in
     x86_64|amd64) echo amd64 ;;
@@ -1815,13 +1813,333 @@ _argo_arch() {
   esac
 }
 
+_argo_tunnels_load() {
+  if [ -f "$ARGO_TUNNELS" ] && _has jq; then
+    jq -c '.' "$ARGO_TUNNELS" 2>/dev/null || echo '{"tunnels":[]}'
+  else
+    echo '{"tunnels":[]}'
+  fi
+}
+
+_argo_tunnels_save() {
+  local json="$1"
+  mkdir -p "$ARGO_DIR"
+  echo "$json" | jq '.' > "$ARGO_TUNNELS" 2>/dev/null || echo "$json" > "$ARGO_TUNNELS"
+}
+
+_argo_tunnel_get() {
+  local name="$1"
+  _argo_tunnels_load | jq -c --arg n "$name" '.tunnels[]? | select(.name==$n)' 2>/dev/null
+}
+
+_argo_tunnel_exists() {
+  [ -n "$(_argo_tunnel_get "$1")" ]
+}
+
+_argo_tunnel_count() {
+  _argo_tunnels_load | jq '.tunnels | length' 2>/dev/null || echo 0
+}
+
+_argo_tunnel_add() {
+  local name="$1" type="$2" local_url="${3:-}"
+  local tunnels
+  tunnels=$(_argo_tunnels_load | jq --arg n "$name" --arg t "$type" --arg u "$local_url" \
+    '.tunnels += [{"name":$n,"type":$t,"local_url":$u,"enabled":false,"autostart":true,"autorestart":true,"health_check":false,"public_url":"","created_at":(now|strftime("%Y-%m-%d %H:%M:%S"))}]')
+  _argo_tunnels_save "$tunnels"
+}
+
+_argo_tunnel_remove() {
+  local name="$1" svc
+  local tunnels
+  tunnels=$(_argo_tunnels_load | jq --arg n "$name" 'del(.tunnels[] | select(.name==$n))')
+  _argo_tunnels_save "$tunnels"
+  rm -f "$ARGO_DIR/${name}.yml" "$ARGO_DIR/${name}.log" "$ARGO_DIR/${name}.pid" "$ARGO_DIR/token_${name}"
+  svc="cloudflared-sheldon-${name}"
+  if _has systemctl; then
+    systemctl disable --now "$svc" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${svc}.service"
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+}
+
+_argo_tunnel_set() {
+  local name="$1" key="$2" val="$3"
+  local tunnels
+  tunnels=$(_argo_tunnels_load | jq --arg n "$name" --arg v "$val" \
+    "(.tunnels[] | select(.name==\$n)).${key} = \$v")
+  _argo_tunnels_save "$tunnels"
+}
+
+_argo_tunnel_set_json() {
+  local name="$1" key="$2" val="$3"
+  local tunnels
+  tunnels=$(_argo_tunnels_load | jq --arg n "$name" --argjson v "$val" \
+    "(.tunnels[] | select(.name==\$n)).${key} = \$v")
+  _argo_tunnels_save "$tunnels"
+}
+
+_argo_tunnel_enable() {
+  _argo_tunnel_set_json "$1" "enabled" "true"
+}
+
+_argo_tunnel_disable() {
+  _argo_tunnel_set_json "$1" "enabled" "false"
+  _argo_tunnel_set "$1" "public_url" ""
+}
+
+_argo_service_name() {
+  echo "cloudflared-sheldon-${1}"
+}
+
+_argo_tunnel_config_yml() {
+  local name="$1" local_url="$2"
+  cat <<EOF
+# sing-box Sheldon Argo tunnel: ${name}
+url: ${local_url}
+no-autoupdate: true
+edge-ip-version: auto
+protocol: quic
+loglevel: warn
+retries: 5
+EOF
+}
+
+_argo_service_unit_quick() {
+  local name="$1" svc="$2" config="$3"
+  cat <<EOF
+[Unit]
+Description=Cloudflare Tunnel (${name}) for sing-box Sheldon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${ARGO_BIN} tunnel --config ${config}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+MemoryAccounting=true
+MemoryMax=96M
+CPUAccounting=true
+CPUQuota=60%
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+_argo_service_unit_token() {
+  local name="$1" svc="$2" token_file="$3"
+  cat <<EOF
+[Unit]
+Description=Cloudflare Named Tunnel (${name}) for sing-box Sheldon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=${token_file}
+ExecStart=${ARGO_BIN} tunnel --no-autoupdate run --token \${TUNNEL_TOKEN}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+MemoryAccounting=true
+MemoryMax=96M
+CPUAccounting=true
+CPUQuota=60%
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+_argo_tunnel_start() {
+  local name="$1" tunnel type local_url public_url svc config token_file token
+  tunnel=$(_argo_tunnel_get "$name")
+  [ -n "$tunnel" ] || { _err "隧道不存在: $name"; return 1; }
+
+  type=$(echo "$tunnel" | jq -r '.type')
+  local_url=$(echo "$tunnel" | jq -r '.local_url // ""')
+  svc=$(_argo_service_name "$name")
+
+  if _has systemctl; then
+    systemctl stop "$svc" 2>/dev/null || true
+  fi
+  [ -f "$ARGO_DIR/${name}.pid" ] && kill "$(cat "$ARGO_DIR/${name}.pid")" 2>/dev/null || true
+
+  mkdir -p "$ARGO_DIR"
+
+  case "$type" in
+    quick)
+      [ -z "$local_url" ] && local_url="$(_argo_pick_local_url)"
+      _argo_validate_url "$local_url" || return 1
+      config="$ARGO_DIR/${name}.yml"
+      _argo_tunnel_config_yml "$name" "$local_url" > "$config"
+
+      if _has systemctl; then
+        _argo_service_unit_quick "$name" "$svc" "$config" > "/etc/systemd/system/${svc}.service"
+        systemctl daemon-reload
+        systemctl enable --now "$svc" >/dev/null 2>&1 || true
+      else
+        nohup "$ARGO_BIN" tunnel --config "$config" >"$ARGO_DIR/${name}.log" 2>&1 &
+        echo $! >"$ARGO_DIR/${name}.pid"
+      fi
+      sleep 4
+      local logfile="$ARGO_DIR/${name}.log"
+      if _has journalctl && _has systemctl; then
+        journalctl -u "$svc" -n 80 --no-pager > "$logfile" 2>/dev/null || true
+      fi
+      public_url=$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$logfile" 2>/dev/null | tail -1 || true)
+      [ -n "$public_url" ] && _argo_tunnel_set "$name" "public_url" "$public_url"
+
+      _argo_tunnel_enable "$name"
+      _ok "Quick Tunnel [${name}] 已启动"
+      echo "本地地址: $local_url"
+      [ -n "$public_url" ] && echo "公网域名: $public_url" || echo "域名生成中，稍后查看日志。"
+      ;;
+    named)
+      echo "粘贴 Cloudflare Tunnel Token（不会显示）:"
+      read -r -s -p "Tunnel Token: " token; echo
+      [ -n "$token" ] || { _err "Token 不能为空"; return 1; }
+      case "$token" in TUNNEL_TOKEN=*) ;; *) token="TUNNEL_TOKEN=$token" ;; esac
+
+      token_file="$ARGO_DIR/token_${name}"
+      printf '%s\n' "$token" > "$token_file"
+      chmod 600 "$token_file" 2>/dev/null || true
+
+      if _has systemctl; then
+        _argo_service_unit_token "$name" "$svc" "$token_file" > "/etc/systemd/system/${svc}.service"
+        systemctl daemon-reload
+        systemctl enable --now "$svc" >/dev/null 2>&1 || true
+      else
+        nohup env "$(cat "$token_file")" "$ARGO_BIN" tunnel --no-autoupdate run --token "${token#TUNNEL_TOKEN=}" >"$ARGO_DIR/${name}.log" 2>&1 &
+        echo $! >"$ARGO_DIR/${name}.pid"
+      fi
+
+      _argo_tunnel_enable "$name"
+      _ok "Named Tunnel [${name}] 已启动"
+      _warn "请在 Cloudflare Zero Trust 里把 Public Hostname 指向本机服务端口。"
+      ;;
+    *)
+      _err "未知隧道类型: $type"; return 1
+      ;;
+  esac
+}
+
+_argo_tunnel_stop() {
+  local name="$1" svc
+  svc=$(_argo_service_name "$name")
+  if _has systemctl; then
+    systemctl disable --now "$svc" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${svc}.service"
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+  [ -f "$ARGO_DIR/${name}.pid" ] && kill "$(cat "$ARGO_DIR/${name}.pid")" 2>/dev/null || true
+  rm -f "$ARGO_DIR/${name}.pid"
+  _argo_tunnel_disable "$name"
+  _ok "隧道 [${name}] 已停止"
+}
+
+_argo_tunnel_autostart() {
+  local name="$1" svc enable="${2:-true}"
+  svc=$(_argo_service_name "$name")
+  _argo_tunnel_set_json "$name" "autostart" "$enable"
+  if _has systemctl; then
+    $enable && systemctl enable "$svc" >/dev/null 2>&1 || systemctl disable "$svc" >/dev/null 2>&1 || true
+  fi
+  [ "$enable" = "true" ] && _ok "隧道 [${name}] 已设为开机自启" || _ok "隧道 [${name}] 已取消开机自启"
+}
+
+_argo_tunnel_health_check() {
+  local name="$1" tunnel public_url enabled type logfile svc
+  tunnel=$(_argo_tunnel_get "$name")
+  [ -n "$tunnel" ] || { _err "隧道不存在: $name"; return 1; }
+
+  enabled=$(echo "$tunnel" | jq -r '.enabled')
+  [ "$enabled" != "true" ] && { return 0; }
+
+  type=$(echo "$tunnel" | jq -r '.type')
+  public_url=$(echo "$tunnel" | jq -r '.public_url // ""')
+
+  if [ "$type" = "quick" ] && [ -z "$public_url" ]; then
+    logfile="$ARGO_DIR/${name}.log"
+    svc=$(_argo_service_name "$name")
+    if _has journalctl && _has systemctl; then
+      journalctl -u "$svc" -n 80 --no-pager > "$logfile" 2>/dev/null || true
+    fi
+    public_url=$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$logfile" 2>/dev/null | tail -1 || true)
+    [ -n "$public_url" ] && _argo_tunnel_set "$name" "public_url" "$public_url"
+  fi
+
+  if [ -n "$public_url" ]; then
+    local http_code ts
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$public_url" 2>/dev/null || echo "000")
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    if [ "$http_code" != "000" ]; then
+      echo "[${ts}] ✓ ${name}: ${public_url} → HTTP ${http_code}" >> "$ARGO_HEALTH_LOG"
+      return 0
+    else
+      echo "[${ts}] ✗ ${name}: ${public_url} → 不可达，尝试重启..." >> "$ARGO_HEALTH_LOG"
+      _warn "隧道 [${name}] 不可达，自动重启中..."
+      _argo_tunnel_stop "$name"
+      sleep 2
+      _argo_tunnel_start "$name"
+    fi
+  fi
+}
+
+_argo_health_check_all() {
+  local tunnels count i name
+  tunnels=$(_argo_tunnels_load)
+  count=$(echo "$tunnels" | jq '.tunnels | length')
+  [ "$count" -eq 0 ] && { echo "没有隧道。"; return; }
+
+  echo "正在检查 ${count} 个隧道..."
+  for i in $(seq 0 $((count - 1))); do
+    name=$(echo "$tunnels" | jq -r ".tunnels[${i}].name")
+    _argo_tunnel_health_check "$name"
+  done
+}
+
+_argo_table_tunnels() {
+  local tunnels count i name type enabled autostart public_url status_str autostart_str
+  tunnels=$(_argo_tunnels_load)
+  count=$(echo "$tunnels" | jq '.tunnels | length')
+
+  if [ "$count" -eq 0 ]; then
+    echo -e "${YELLOW}  暂无隧道${NC}"
+    return
+  fi
+
+  printf "  %-16s %-8s %-6s %-6s %s\n" "名称" "类型" "状态" "自启" "公网地址"
+  echo "  ------------------------------------------------------------------------"
+  for i in $(seq 0 $((count - 1))); do
+    name=$(echo "$tunnels" | jq -r ".tunnels[${i}].name")
+    type=$(echo "$tunnels" | jq -r ".tunnels[${i}].type")
+    enabled=$(echo "$tunnels" | jq -r ".tunnels[${i}].enabled")
+    autostart=$(echo "$tunnels" | jq -r ".tunnels[${i}].autostart")
+    public_url=$(echo "$tunnels" | jq -r ".tunnels[${i}].public_url // \"-\"")
+
+    [ "$enabled" = "true" ] && status_str="${GREEN}运行中${NC}" || status_str="${RED}已停${NC}"
+    [ "$autostart" = "true" ] && autostart_str="${GREEN}是${NC}" || autostart_str="${YELLOW}否${NC}"
+
+    printf "  %-16s %-8s %b %b  %s\n" "$name" "$type" "$status_str" "$autostart_str" "${public_url:0:36}"
+  done
+}
+
 _install_cloudflared() {
   _need_root
   _ensure_core_deps >/dev/null 2>&1 || true
   local force="${1:-}" arch url tmp oldv newv
   if [ -x "$ARGO_BIN" ] && [ "$force" != "force" ]; then
     _ok "cloudflared 已安装: $($ARGO_BIN --version 2>/dev/null | head -1)"
-    echo "如需强制更新，可在 Argo 菜单选择安装/更新，或执行: sing-box-sheldon argo-update"
+    echo "如需强制更新，可在菜单选择安装/更新。"
     return 0
   fi
   arch="$(_argo_arch)"
@@ -1858,139 +2176,272 @@ _argo_validate_url() {
   esac
 }
 
-_argo_service_install_quick() {
-  local url="$1"
-  mkdir -p "$ARGO_DIR"
-  cat >"$ARGO_CONFIG" <<EOF
-# sing-box Sheldon Argo quick tunnel
-# 仅监听本机 127.0.0.1，不额外暴露公网端口
-url: ${url}
-no-autoupdate: true
-edge-ip-version: auto
-protocol: quic
-loglevel: warn
-retries: 5
-EOF
-  if _has systemctl; then
-    cat >"/etc/systemd/system/${ARGO_SERVICE}.service" <<EOF
-[Unit]
-Description=Cloudflare Tunnel for sing-box Sheldon
-After=network-online.target
-Wants=network-online.target
+_argo_create_quick() {
+  local name local_url
+  read -r -p "隧道名称（英文/数字）: " name
+  [ -z "$name" ] && { _err "名称不能为空"; return; }
+  name=$(echo "$name" | tr -cd 'A-Za-z0-9_-')
 
-[Service]
-Type=simple
-ExecStart=${ARGO_BIN} tunnel --config ${ARGO_CONFIG}
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-MemoryAccounting=true
-MemoryMax=96M
-CPUAccounting=true
-CPUQuota=60%
+  _argo_tunnel_exists "$name" && { _err "隧道 [${name}] 已存在"; return; }
 
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable --now "$ARGO_SERVICE" >/dev/null 2>&1 || true
-  else
-    nohup "$ARGO_BIN" tunnel --config "$ARGO_CONFIG" >"$ARGO_DIR/quick.log" 2>&1 &
-    echo $! >"$ARGO_DIR/quick.pid"
+  read -r -p "本地服务地址 [自动选择]: " local_url
+  local_url="${local_url:-$(_argo_pick_local_url)}"
+  _argo_validate_url "$local_url" || return 1
+
+  _argo_tunnel_add "$name" "quick" "$local_url"
+  _ok "Quick Tunnel [${name}] 已创建 → ${local_url}"
+  echo
+  read -r -p "是否立即启动? [Y/n]: " yn
+  [ "$yn" != "n" ] && [ "$yn" != "N" ] && _argo_tunnel_start "$name"
+}
+
+_argo_create_named() {
+  local name
+  read -r -p "隧道名称（英文/数字）: " name
+  [ -z "$name" ] && { _err "名称不能为空"; return; }
+  name=$(echo "$name" | tr -cd 'A-Za-z0-9_-')
+
+  _argo_tunnel_exists "$name" && { _err "隧道 [${name}] 已存在"; return; }
+
+  _argo_tunnel_add "$name" "named" ""
+  _ok "Named Tunnel [${name}] 已创建"
+  echo
+  read -r -p "是否立即配置 Token 并启动? [Y/n]: " yn
+  [ "$yn" != "n" ] && [ "$yn" != "N" ] && _argo_tunnel_start "$name"
+}
+
+_argo_manage_tunnel() {
+  local name="$1" tunnel type enabled local_url public_url autostart health
+  tunnel=$(_argo_tunnel_get "$name")
+  [ -z "$tunnel" ] && { _err "隧道不存在: $name"; return; }
+
+  while true; do
+    clear
+    enabled=$(echo "$tunnel" | jq -r '.enabled')
+    type=$(echo "$tunnel" | jq -r '.type')
+    local_url=$(echo "$tunnel" | jq -r '.local_url // "-"')
+    public_url=$(echo "$tunnel" | jq -r '.public_url // "-"')
+    autostart=$(echo "$tunnel" | jq -r '.autostart')
+    health=$(echo "$tunnel" | jq -r '.health_check')
+
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "${BOLD}${WHITE}              隧道: ${name}${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "  类型: ${GREEN}${type}${NC}"
+    echo -e "  状态: $([ "$enabled" = "true" ] && echo -e "${GREEN}运行中${NC}" || echo -e "${RED}已停${NC}")"
+    echo -e "  本地: ${local_url}"
+    echo -e "  公网: ${public_url}"
+    echo -e "  自启: $([ "$autostart" = "true" ] && echo -e "${GREEN}是${NC}" || echo -e "${YELLOW}否${NC}")"
+    echo -e "  健康: $([ "$health" = "true" ] && echo -e "${GREEN}开${NC}" || echo -e "${YELLOW}关${NC}")"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "    ${BLUE}1.${NC} $([ "$enabled" = "true" ] && echo "${RED}停止${NC}" || echo "${GREEN}启动${NC}")"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}查看日志${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}切换开机自启${NC}"
+    echo -e "    ${BLUE}4.${NC} ${GREEN}切换健康检查${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}健康检查（手动）${NC}"
+    echo -e "    ${BLUE}6.${NC} ${GREEN}重新启动${NC}"
+    echo -e "    ${BLUE}7.${NC} ${RED}删除隧道${NC}"
+    echo -e "    ${RED}0.${NC} ${GREEN}返回${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    read -r -p "请选择: " c
+
+    case "$c" in
+      1)
+        if [ "$enabled" = "true" ]; then _argo_tunnel_stop "$name"
+        else _argo_tunnel_start "$name"; fi
+        ;;
+      2)
+        local svc
+        svc=$(_argo_service_name "$name")
+        if _has journalctl && _has systemctl; then
+          journalctl -u "$svc" -n 60 --no-pager 2>/dev/null
+        fi
+        [ -f "$ARGO_DIR/${name}.log" ] && tail -n 40 "$ARGO_DIR/${name}.log"
+        ;;
+      3)
+        if [ "$autostart" = "true" ]; then
+          _argo_tunnel_autostart "$name" "false"
+        else
+          _argo_tunnel_autostart "$name" "true"
+        fi
+        ;;
+      4)
+        if [ "$health" = "true" ]; then
+          _argo_tunnel_set_json "$name" "health_check" "false"
+          _ok "健康检查已关闭"
+        else
+          _argo_tunnel_set_json "$name" "health_check" "true"
+          _ok "健康检查已开启"
+        fi
+        ;;
+      5) _argo_tunnel_health_check "$name" ;;
+      6)
+        _argo_tunnel_stop "$name"
+        sleep 2
+        _argo_tunnel_start "$name"
+        ;;
+      7)
+        read -r -p "确认删除隧道 [${name}]? (输入 yes): " confirm
+        [ "$confirm" = "yes" ] || { _pause; tunnel=$(_argo_tunnel_get "$name"); continue; }
+        if [ "$enabled" = "true" ]; then _argo_tunnel_stop "$name"; fi
+        _argo_tunnel_remove "$name"
+        _ok "隧道 [${name}] 已删除"
+        break
+        ;;
+      0) break ;;
+    esac
+    tunnel=$(_argo_tunnel_get "$name")
+    _pause
+  done
+}
+
+_argo_export_hybrid_node() {
+  if ! _has jq; then _err "需要 jq"; return 1; fi
+
+  local tunnels enabled_tunnel public_url tname argo_host name row proto port uuid pass pbk sid sni alpn
+  tunnels=$(_argo_tunnels_load)
+  enabled_tunnel=$(echo "$tunnels" | jq -r '.tunnels[]? | select(.enabled==true and .public_url!="") | "\(.name)|\(.public_url)"' 2>/dev/null | head -1)
+
+  if [ -z "$enabled_tunnel" ]; then
+    _err "没有可用的 Argo 隧道（需运行中且有公网地址）"
+    echo "请先启动一个 Quick Tunnel。"
+    return 1
   fi
-}
 
-_argo_start_quick() {
-  _need_root
-  _install_cloudflared || return 1
-  local url log public
-  read -r -p "本地服务地址 [自动选择第一个用户端口]: " url
-  url="${url:-$(_argo_pick_local_url)}"
-  _argo_validate_url "$url" || return 1
-  mkdir -p "$ARGO_DIR"
-  _argo_service_install_quick "$url"
-  sleep 4
-  log="$ARGO_DIR/quick.log"
-  if _has journalctl && _has systemctl; then
-    journalctl -u "$ARGO_SERVICE" -n 80 --no-pager > "$log" 2>/dev/null || true
+  tname="${enabled_tunnel%%|*}"
+  public_url="${enabled_tunnel#*|}"
+  argo_host="${public_url#https://}"
+  argo_host="${argo_host#http://}"
+
+  echo -e "${CYAN}使用 Argo 隧道: [${tname}] → ${public_url}${NC}"
+  echo
+
+  if [ ! -s "$USER_FILE" ]; then
+    _err "没有用户数据，请先创建用户。"
+    return 1
   fi
-  public=$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$log" 2>/dev/null | tail -1 || true)
-  [ -n "$public" ] && echo "quick_url=$public" > "$ARGO_INFO"
-  _ok "Argo Quick Tunnel 已启动"
-  echo "本地地址: $url"
-  [ -n "$public" ] && echo "临时隧道: $public" || echo "临时域名生成中，可稍后在日志查看。"
-  _warn "Quick Tunnel 是临时域名，重启可能变化；长期稳定请用 Cloudflare Named Tunnel Token。"
+
+  _table_users
+  read -r -p "选择用户名生成 Argo 节点: " name
+  [ -z "$name" ] && return
+
+  row=$(jq -c --arg name "$name" '.users[]? | select(.name==$name)' "$USER_FILE")
+  [ -n "$row" ] || { _err "用户不存在"; return; }
+
+  proto=$(echo "$row" | jq -r .protocol)
+  port=$(echo "$row" | jq -r .port)
+  uuid=$(echo "$row" | jq -r .uuid)
+  pass=$(echo "$row" | jq -r .password)
+  pbk=$(echo "$row" | jq -r '.reality_public_key // ""')
+  sid=$(echo "$row" | jq -r '.reality_short_id // ""')
+  sni=$(echo "$row" | jq -r '.reality_server_name // "www.microsoft.com"')
+  alpn=$(echo "$row" | jq -r '.reality_alpn // "h2,http/1.1"')
+
+  echo
+  echo -e "${GREEN}══════════════ Argo 混合节点 ══════════════${NC}"
+  echo "隧道: ${public_url}"
+
+  case "$proto" in
+    vless|vless-reality|reality|sheldon|sheldon-reality|sheldon-vless)
+      echo
+      echo -e "${GREEN}VLESS + Argo:${NC}"
+      echo "vless://${uuid}@${argo_host}:443?type=tcp&security=tls&sni=${argo_host}&fp=chrome&alpn=h2,http/1.1&flow=xtls-rprx-vision#${name}-argo"
+      echo
+      echo "说明: VLESS over TLS → Cloudflare Argo → 本地 sing-box"
+      echo "注意: Cloudflare 终结 TLS，本地可不启用 Reality"
+      ;;
+    vmess)
+      echo
+      echo -e "${GREEN}VMess + Argo (WebSocket):${NC}"
+      echo "vmess://$(printf '{"v":"2","ps":"%s-argo","add":"%s","port":"443","id":"%s","aid":"0","net":"ws","type":"none","host":"%s","path":"/","tls":"tls"}' "$name" "$argo_host" "$uuid" "$argo_host" | base64 -w0)"
+      echo
+      echo "说明: VMess over WebSocket + TLS → Cloudflare Argo → 本地"
+      ;;
+    trojan)
+      echo
+      echo -e "${GREEN}Trojian + Argo:${NC}"
+      echo "trojan://${pass}@${argo_host}:443?security=tls&sni=${argo_host}#${name}-argo"
+      ;;
+    *)
+      echo
+      _warn "协议 ${proto} 的 Argo 混合节点暂不支持自动生成。"
+      echo "建议手动将 IP:Port 替换为: ${argo_host}:443"
+      ;;
+  esac
+  echo -e "${GREEN}══════════════════════════════════════════${NC}"
 }
 
-_argo_token_service() {
-  local token="$1"
-  mkdir -p "$ARGO_DIR"
-  chmod 700 "$ARGO_DIR" 2>/dev/null || true
-  printf '%s\n' "$token" > "$ARGO_DIR/token"
-  chmod 600 "$ARGO_DIR/token" 2>/dev/null || true
-  if _has systemctl; then
-    cat >"/etc/systemd/system/${ARGO_SERVICE}.service" <<EOF
-[Unit]
-Description=Cloudflare Named Tunnel for sing-box Sheldon
-After=network-online.target
-Wants=network-online.target
+_argo_logs() {
+  local name="${1:-}" tunnels count i svc
+  tunnels=$(_argo_tunnels_load)
+  count=$(echo "$tunnels" | jq '.tunnels | length')
 
-[Service]
-Type=simple
-EnvironmentFile=${ARGO_DIR}/token
-ExecStart=${ARGO_BIN} tunnel --no-autoupdate run --token \${TUNNEL_TOKEN}
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-MemoryAccounting=true
-MemoryMax=96M
-CPUAccounting=true
-CPUQuota=60%
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable --now "$ARGO_SERVICE" >/dev/null 2>&1 || true
-  else
-    nohup env "$(cat "$ARGO_DIR/token")" "$ARGO_BIN" tunnel --no-autoupdate run --token "${token#TUNNEL_TOKEN=}" >"$ARGO_DIR/named.log" 2>&1 &
-    echo $! >"$ARGO_DIR/named.pid"
+  if [ -n "$name" ]; then
+    svc=$(_argo_service_name "$name")
+    if _has journalctl && _has systemctl; then
+      journalctl -u "$svc" -n 80 --no-pager 2>/dev/null
+    fi
+    [ -f "$ARGO_DIR/${name}.log" ] && tail -n 40 "$ARGO_DIR/${name}.log"
+    return
   fi
+
+  if [ "$count" -eq 0 ]; then
+    echo "没有隧道。"
+    return
+  fi
+
+  for i in $(seq 0 $((count - 1))); do
+    name=$(echo "$tunnels" | jq -r ".tunnels[${i}].name")
+    svc=$(_argo_service_name "$name")
+    echo -e "${CYAN}─── 隧道: ${name} ───${NC}"
+    if _has journalctl && _has systemctl; then
+      journalctl -u "$svc" -n 20 --no-pager 2>/dev/null
+    fi
+    [ -f "$ARGO_DIR/${name}.log" ] && tail -n 15 "$ARGO_DIR/${name}.log"
+    echo
+  done
 }
 
-_argo_start_token() {
+_argo_stop_all() {
+  local tunnels count i name
+  tunnels=$(_argo_tunnels_load)
+  count=$(echo "$tunnels" | jq '.tunnels | length')
+  [ "$count" -eq 0 ] && { _warn "没有隧道。"; return; }
+  for i in $(seq 0 $((count - 1))); do
+    name=$(echo "$tunnels" | jq -r ".tunnels[${i}].name")
+    _argo_tunnel_stop "$name"
+  done
+}
+
+_argo_health_cron_install() {
   _need_root
-  _install_cloudflared || return 1
-  local token
-  echo "粘贴 Cloudflare Tunnel Token。脚本只保存到本机 $ARGO_DIR/token，不会输出。"
-  read -r -s -p "Tunnel Token: " token; echo
-  [ -n "$token" ] || { _err "Token 不能为空"; return 1; }
-  case "$token" in TUNNEL_TOKEN=*) ;; *) token="TUNNEL_TOKEN=$token" ;; esac
-  _argo_token_service "$token"
-  _ok "Named Tunnel 已启动"
-  _warn "如需域名伪装，请在 Cloudflare Zero Trust 里把 Public Hostname 指向本机服务端口。"
+  local tmp="/tmp/sing-box-sheldon-crontab.$$"
+  crontab -l 2>/dev/null | grep -v "sing-box-sheldon argo-health" > "$tmp" || true
+  echo "*/5 * * * * root /usr/local/bin/sing-box-sheldon argo-health >/dev/null 2>&1" >> "$tmp"
+  crontab "$tmp" 2>/dev/null || { _err "crontab 写入失败，请手动添加"; rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+  _ok "Argo 健康检查 cron 已安装（每5分钟）"
 }
 
-_argo_status() {
-  if _has systemctl; then systemctl status "$ARGO_SERVICE" --no-pager || true; fi
-  [ -f "$ARGO_INFO" ] && cat "$ARGO_INFO"
-  [ -f "$ARGO_DIR/quick.log" ] && tail -n 30 "$ARGO_DIR/quick.log"
-  [ -f "$ARGO_DIR/named.log" ] && tail -n 30 "$ARGO_DIR/named.log"
-}
-
-_argo_stop() {
+_argo_health_cron_uninstall() {
   _need_root
-  if _has systemctl; then systemctl disable --now "$ARGO_SERVICE" >/dev/null 2>&1 || true; rm -f "/etc/systemd/system/${ARGO_SERVICE}.service"; systemctl daemon-reload || true; fi
-  [ -f "$ARGO_DIR/quick.pid" ] && kill "$(cat "$ARGO_DIR/quick.pid")" >/dev/null 2>&1 || true
-  [ -f "$ARGO_DIR/named.pid" ] && kill "$(cat "$ARGO_DIR/named.pid")" >/dev/null 2>&1 || true
-  rm -f "$ARGO_DIR/quick.pid" "$ARGO_DIR/named.pid"
-  _ok "Argo 隧道已停止"
+  local tmp="/tmp/sing-box-sheldon-crontab.$$"
+  crontab -l 2>/dev/null | grep -v "sing-box-sheldon argo-health" > "$tmp" || true
+  crontab "$tmp" 2>/dev/null || true
+  rm -f "$tmp"
+  _ok "Argo 健康检查 cron 已移除"
+}
+
+_argo_health_do() {
+  local tunnels count i name health_enabled
+  tunnels=$(_argo_tunnels_load)
+  count=$(echo "$tunnels" | jq '.tunnels | length')
+  [ "$count" -eq 0 ] && return
+  for i in $(seq 0 $((count - 1))); do
+    name=$(echo "$tunnels" | jq -r ".tunnels[${i}].name")
+    health_enabled=$(echo "$tunnels" | jq -r ".tunnels[${i}].health_check")
+    [ "$health_enabled" = "true" ] && _argo_tunnel_health_check "$name"
+  done
 }
 
 _argo_menu() {
@@ -1999,32 +2450,70 @@ _argo_menu() {
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     echo -e "${BOLD}${WHITE}                    Argo 隧道管理${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
-    echo -e "${GREEN}用途: 使用 Cloudflare Tunnel 隐藏源站 IP，提高安全伪装。${NC}"
+    echo -e "${GREEN}用途: Cloudflare Tunnel 隐藏源站 IP，支持多隧道并行。${NC}"
     echo -e "${YELLOW}建议: 长期稳定用 Named Tunnel；临时测试用 Quick Tunnel。${NC}"
     echo
-    echo -e "    ${BLUE}1.${NC} ${GREEN}安装/更新 cloudflared 最新版${NC}"
-    echo -e "    ${BLUE}2.${NC} ${GREEN}启动临时 Argo Quick Tunnel${NC}"
-    echo -e "    ${BLUE}3.${NC} ${GREEN}启动 Named Tunnel Token${NC}"
-    echo -e "    ${BLUE}4.${NC} ${GREEN}查看 Argo 状态/日志${NC}"
-    echo -e "    ${BLUE}5.${NC} ${GREEN}停止 Argo 隧道${NC}"
-    echo -e "    ${BLUE}6.${NC} ${GREEN}安全伪装说明${NC}"
+
+    _argo_table_tunnels
+
+    echo
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
+    echo -e "    ${BLUE}1.${NC} ${GREEN}安装/更新 cloudflared${NC}"
+    echo -e "    ${BLUE}2.${NC} ${GREEN}创建 Quick Tunnel${NC}"
+    echo -e "    ${BLUE}3.${NC} ${GREEN}创建 Named Tunnel${NC}"
+    echo -e "    ${BLUE}4.${NC} ${GREEN}管理隧道（启停/日志/设置）${NC}"
+    echo -e "    ${BLUE}5.${NC} ${GREEN}全部健康检查${NC}"
+    echo -e "    ${BLUE}6.${NC} ${GREEN}生成 Argo 混合节点链接${NC}"
+    echo -e "    ${BLUE}7.${NC} ${GREEN}查看全部日志${NC}"
+    echo -e "    ${BLUE}8.${NC} ${GREEN}一键停止所有隧道${NC}"
+    echo -e "    ${BLUE}9.${NC} ${GREEN}安全伪装说明${NC}"
+    echo -e "    ${BLUE}c.${NC} ${GREEN}安装/卸载健康检查 cron${NC}"
     echo -e "    ${RED}0.${NC} ${GREEN}返回主菜单${NC}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
     read -r -p "请选择操作: " c
+
     case "$c" in
       1) _install_cloudflared force; _pause ;;
-      2) _argo_start_quick; _pause ;;
-      3) _argo_start_token; _pause ;;
-      4) _argo_status; _pause ;;
-      5) _argo_stop; _pause ;;
-      6)
+      2) _argo_create_quick; _pause ;;
+      3) _argo_create_named; _pause ;;
+      4)
+        local tunnels count i name
+        tunnels=$(_argo_tunnels_load)
+        count=$(echo "$tunnels" | jq '.tunnels | length')
+        if [ "$count" -eq 0 ]; then
+          echo "暂无隧道。"
+          _pause; continue
+        fi
+        echo "选择隧道:"
+        for i in $(seq 0 $((count - 1))); do
+          name=$(echo "$tunnels" | jq -r ".tunnels[${i}].name")
+          echo "  ${BLUE}$((i+1)).${NC} $name"
+        done
+        read -r -p "选择 [1-${count}]: " idx
+        [ -z "$idx" ] && { _pause; continue; }
+        name=$(echo "$tunnels" | jq -r ".tunnels[$((idx-1))].name" 2>/dev/null)
+        [ -n "$name" ] && [ "$name" != "null" ] && _argo_manage_tunnel "$name"
+        ;;
+      5) _argo_health_check_all; _pause ;;
+      6) _argo_export_hybrid_node; _pause ;;
+      7) _argo_logs; _pause ;;
+      8) _argo_stop_all; _pause ;;
+      9)
         echo "Argo/Cloudflare Tunnel 安全伪装："
         echo "- 入口走 Cloudflare 边缘网络，源站 IP 不直接暴露。"
         echo "- 本地服务建议只监听 127.0.0.1 或防火墙限制来源。"
         echo "- Named Tunnel 可绑定自己的域名并启用 Cloudflare TLS/WAF/Access。"
         echo "- Quick Tunnel 适合测试，域名临时，不建议长期使用。"
         echo "- Argo 只是隧道层；协议层仍推荐 sheldon / sheldon-vless。"
-        _pause ;;
+        echo "- 多隧道支持：可为不同端口/协议各自建立独立隧道。"
+        _pause
+        ;;
+      c)
+        echo -e "    ${BLUE}1.${NC} ${GREEN}安装健康检查 cron（每5分钟）${NC}"
+        echo -e "    ${BLUE}2.${NC} ${GREEN}卸载健康检查 cron${NC}"
+        read -r -p "请选择: " cc
+        case "$cc" in 1) _argo_health_cron_install; _pause ;; 2) _argo_health_cron_uninstall; _pause ;; esac
+        ;;
       0) break ;;
     esac
   done
@@ -2149,7 +2638,11 @@ _command_menu() {
         echo "sing-box-sheldon route-apply        应用分流规则"
         echo "sing-box-sheldon route-clear        清空并应用分流规则"
         echo "sing-box-sheldon argo               Argo 隧道管理"
-        echo "sing-box-sheldon argo-status        查看 Argo 状态"
+        echo "sing-box-sheldon argo-start         启动指定隧道"
+        echo "sing-box-sheldon argo-stop          停止指定隧道"
+        echo "sing-box-sheldon argo-status        查看隧道日志"
+        echo "sing-box-sheldon argo-health        运行健康检查"
+        echo "sing-box-sheldon argo-hybrid        生成 Argo 混合节点"
         echo "sing-box-sheldon limit-user         修改用户限速"
         echo "sing-box-sheldon clear-user-limit   清除用户限速"
         echo "sing-box-sheldon limit-user-conn    修改用户连接数限制"
@@ -2233,10 +2726,11 @@ _cli() {
     create-protocol|add-protocol) _create_protocol_only ;;
     argo|tunnel|cloudflared) _argo_menu ;;
     argo-update) _install_cloudflared force ;;
-    argo-start) _argo_start_quick ;;
-    argo-token) _argo_start_token ;;
-    argo-status) _argo_status ;;
-    argo-stop) _argo_stop ;;
+    argo-start) _argo_tunnel_start ;;
+    argo-stop) _argo_tunnel_stop ;;
+    argo-status) _argo_logs ;;
+    argo-health) _argo_health_do ;;
+    argo-hybrid) _argo_export_hybrid_node ;;
     uninstall) _uninstall_all ;;
     restart) _service restart ;;
     start) _service start ;;
