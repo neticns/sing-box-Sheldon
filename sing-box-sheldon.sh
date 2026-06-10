@@ -106,6 +106,11 @@ _ensure_core_deps() {
   _ensure_cmd openssl openssl || true
   _ensure_cmd nohup coreutils || true
   if ! _has curl && _has wget; then _warn "curl 不可用，将使用 wget 下载"; fi
+  # Alpine: sing-box 需要 glibc 兼容层，否则菜单/TUI 无法正常显示
+  if _has apk && [ "$(_detect_os)" = "alpine" ]; then
+    _pkg_install_one libc6-compat || true
+    _pkg_install_one gcompat || true
+  fi
   return 0
 }
 
